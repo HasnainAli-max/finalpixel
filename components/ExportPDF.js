@@ -15,7 +15,7 @@ const ExportPDF = ({ result }) => {
     <div className="mt-4">
       <button
         onClick={handlePrint}
-        className="bg-blue-500 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded"
+        className="bg-purple-800 hover:bg-purple-900 text-white font-semibold py-2 px-4 rounded"
       >
         Export as PDF
       </button>
