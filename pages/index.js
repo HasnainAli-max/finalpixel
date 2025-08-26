@@ -32,36 +32,77 @@ export default function LandingPage() {
 
   // subscription state
   const [hasActivePlan, setHasActivePlan] = useState(false);
+  const [planKnown, setPlanKnown] = useState(false); // NEW: first-read guard to avoid brief enable
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => setUser(u || null));
     return () => unsub();
   }, []);
 
-  // Read user's plan from Firestore (without changing any other behavior)
+  // Read user's plan from Firestore (real-time) + use cached value to prevent flash
   useEffect(() => {
-    let cancelled = false;
+    let unsub = null;
 
-    async function fetchPlan(u) {
+    async function initForUser(u) {
+      const db = getFirestore();
+      const ref = doc(db, 'users', u.uid);
+
+      // 1) Prime from cache so we don't briefly enable after an upgrade
       try {
-        const db = getFirestore();
-        const snap = await getDoc(doc(db, 'users', u.uid));
-        const d = snap.exists() ? snap.data() : {};
-        const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
-        const active = ['basic', 'pro', 'elite'].includes(rawPlan);
-        if (!cancelled) setHasActivePlan(active);
+        const cached = localStorage.getItem(`pp_has_plan_${u.uid}`);
+        if (cached !== null) {
+          setHasActivePlan(cached === '1');
+          setPlanKnown(true);
+        } else {
+          // If we don't know yet, keep disabled until first snapshot arrives
+          setPlanKnown(false);
+        }
       } catch {
-        if (!cancelled) setHasActivePlan(false);
+        setPlanKnown(false);
       }
+
+      // 2) Live subscribe
+      unsub = onSnapshot(
+        ref,
+        (snap) => {
+          const d = snap.exists() ? snap.data() : {};
+          const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
+          const active = ['basic', 'pro', 'elite'].includes(rawPlan);
+          setHasActivePlan(active);
+          setPlanKnown(true);
+          try {
+            localStorage.setItem(`pp_has_plan_${u.uid}`, active ? '1' : '0');
+          } catch {}
+        },
+        async () => {
+          // Fallback to one-time read if snapshot errors
+          try {
+            const one = await getDoc(ref);
+            const d = one.exists() ? one.data() : {};
+            const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
+            const active = ['basic', 'pro', 'elite'].includes(rawPlan);
+            setHasActivePlan(active);
+            setPlanKnown(true);
+            try {
+              localStorage.setItem(`pp_has_plan_${u.uid}`, active ? '1' : '0');
+            } catch {}
+          } catch {
+            setHasActivePlan(false);
+            setPlanKnown(true);
+          }
+        }
+      );
     }
 
     if (user?.uid) {
-      fetchPlan(user);
+      initForUser(user);
     } else {
+      // logged out
       setHasActivePlan(false);
+      setPlanKnown(true);
     }
 
-    return () => { cancelled = true; };
+    return () => unsub && unsub();
   }, [user]);
 
   // ---- Single-active-session guard (minimal + safe) ----
@@ -126,9 +167,14 @@ export default function LandingPage() {
     }
   };
 
+  // Disable logic:
+  // - If user is logged in and plan is KNOWN → disable only when hasActivePlan
+  // - If user is logged in and plan is NOT KNOWN YET (first paint) → keep disabled to avoid brief enable
+  const shouldDisableForUser = (user && (!planKnown || hasActivePlan));
+
   // Prevent click & keyboard activation without changing styles
-  const blockIfHasPlan = (e) => {
-    if (user && hasActivePlan) {
+  const blockIfDisabled = (e) => {
+    if (shouldDisableForUser) {
       e.preventDefault();
       e.stopPropagation();
       return true;
@@ -136,8 +182,8 @@ export default function LandingPage() {
     return false;
   };
 
-  const blockKeyIfHasPlan = (e) => {
-    if (!(user && hasActivePlan)) return;
+  const blockKeyIfDisabled = (e) => {
+    if (!shouldDisableForUser) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       e.stopPropagation();
@@ -365,11 +411,11 @@ export default function LandingPage() {
             <p className="text-sm text-gray-600 mb-4">100 comparisons / month</p>
             <Link href={`/signup?next=/billing/checkout?plan=basic`}>
               <button
-                className={`bg-purple-800 text-white w-full py-2 rounded ${user && hasActivePlan ? 'opacity-60 cursor-not-allowed' : ''}`}
+                className={`bg-purple-800 text-white w-full py-2 rounded ${shouldDisableForUser ? 'opacity-60 cursor-not-allowed' : ''}`}
                 title={user && hasActivePlan ? 'You already have a plan' : undefined}
-                aria-disabled={user && hasActivePlan ? 'true' : undefined}
+                aria-disabled={shouldDisableForUser ? 'true' : undefined}
                 onClick={(e) => {
-                  if (user && hasActivePlan) { e.preventDefault(); e.stopPropagation(); return; }
+                  if (blockIfDisabled(e)) return;
                   if (auth.currentUser) {
                     e.preventDefault();
                     e.stopPropagation();
@@ -378,11 +424,7 @@ export default function LandingPage() {
                     try { localStorage.setItem('postSignupNext', '/billing/checkout?plan=basic'); } catch {}
                   }
                 }}
-                onKeyDown={(e) => {
-                  if (user && hasActivePlan && (e.key === 'Enter' || e.key === ' ')) {
-                    e.preventDefault(); e.stopPropagation();
-                  }
-                }}
+                onKeyDown={blockKeyIfDisabled}
               >
                 Choose Starter
               </button>
@@ -396,11 +438,11 @@ export default function LandingPage() {
             <p className="text-sm text-gray-600 mb-4">500 comparisons / month</p>
             <Link href={`/signup?next=/billing/checkout?plan=pro`}>
               <button
-                className={`bg-purple-800 text-white w-full py-2 rounded ${user && hasActivePlan ? 'opacity-60 cursor-not-allowed' : ''}`}
+                className={`bg-purple-800 text-white w-full py-2 rounded ${shouldDisableForUser ? 'opacity-60 cursor-not-allowed' : ''}`}
                 title={user && hasActivePlan ? 'You already have a plan' : undefined}
-                aria-disabled={user && hasActivePlan ? 'true' : undefined}
+                aria-disabled={shouldDisableForUser ? 'true' : undefined}
                 onClick={(e) => {
-                  if (user && hasActivePlan) { e.preventDefault(); e.stopPropagation(); return; }
+                  if (blockIfDisabled(e)) return;
                   if (auth.currentUser) {
                     e.preventDefault();
                     e.stopPropagation();
@@ -409,11 +451,7 @@ export default function LandingPage() {
                     try { localStorage.setItem('postSignupNext', '/billing/checkout?plan=pro'); } catch {}
                   }
                 }}
-                onKeyDown={(e) => {
-                  if (user && hasActivePlan && (e.key === 'Enter' || e.key === ' ')) {
-                    e.preventDefault(); e.stopPropagation();
-                  }
-                }}
+                onKeyDown={blockKeyIfDisabled}
               >
                 Choose Pro
               </button>
@@ -427,11 +465,11 @@ export default function LandingPage() {
             <p className="text-sm text-gray-600 mb-4">Unlimited comparisons</p>
             <Link href={`/signup?next=/billing/checkout?plan=elite`}>
               <button
-                className={`bg-purple-800 text-white w-full py-2 rounded ${user && hasActivePlan ? 'opacity-60 cursor-not-allowed' : ''}`}
+                className={`bg-purple-800 text-white w-full py-2 rounded ${shouldDisableForUser ? 'opacity-60 cursor-not-allowed' : ''}`}
                 title={user && hasActivePlan ? 'You already have a plan' : undefined}
-                aria-disabled={user && hasActivePlan ? 'true' : undefined}
+                aria-disabled={shouldDisableForUser ? 'true' : undefined}
                 onClick={(e) => {
-                  if (user && hasActivePlan) { e.preventDefault(); e.stopPropagation(); return; }
+                  if (blockIfDisabled(e)) return;
                   if (auth.currentUser) {
                     e.preventDefault();
                     e.stopPropagation();
@@ -440,11 +478,7 @@ export default function LandingPage() {
                     try { localStorage.setItem('postSignupNext', '/billing/checkout?plan=elite'); } catch {}
                   }
                 }}
-                onKeyDown={(e) => {
-                  if (user && hasActivePlan && (e.key === 'Enter' || e.key === ' ')) {
-                    e.preventDefault(); e.stopPropagation();
-                  }
-                }}
+                onKeyDown={blockKeyIfDisabled}
               >
                 Choose Unlimited
               </button>
