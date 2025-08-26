@@ -4,12 +4,26 @@ import Link from 'next/link';
 import Head from 'next/head';
 import { auth } from '@/lib/firebase/config';
 import { onAuthStateChanged, signOut as fbSignOut } from 'firebase/auth';
-import { getFirestore, doc, getDoc } from 'firebase/firestore'; // added for plan check
+import { getFirestore, doc, getDoc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore'; // + onSnapshot, setDoc, serverTimestamp
 
 // Public envs (kept as in your file)
 const PRICE_BASIC = process.env.NEXT_PUBLIC_STRIPE_PRICE_BASIC || 'price_basic_xxx';
 const PRICE_PRO = process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO || 'price_pro_xxx';
 const PRICE_ELITE = process.env.NEXT_PUBLIC_STRIPE_PRICE_ELITE || 'price_elite_xxx';
+
+// stable per-browser session id
+function getOrCreateSessionId() {
+  try {
+    let id = localStorage.getItem('pp_session_id');
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+      localStorage.setItem('pp_session_id', id);
+    }
+    return id;
+  } catch {
+    return 'fallback-session';
+  }
+}
 
 export default function LandingPage() {
   // Auth-aware header state
@@ -49,6 +63,27 @@ export default function LandingPage() {
 
     return () => { cancelled = true; };
   }, [user]);
+
+  // ---- Single-active-session guard (minimal + safe) ----
+  useEffect(() => {
+    if (!user?.uid) return;
+    const db = getFirestore();
+    const ref = doc(db, 'users', user.uid);
+    const mySessionId = getOrCreateSessionId();
+
+    // Claim (last-login wins)
+    setDoc(ref, { activeSessionId: mySessionId, sessionUpdatedAt: serverTimestamp() }, { merge: true }).catch(() => {});
+
+    // Watch for takeover by another device and sign out here if so
+    const unsub = onSnapshot(ref, (snap) => {
+      const data = snap.exists() ? snap.data() : {};
+      const active = data?.activeSessionId;
+      if (active && active !== mySessionId) {
+        fbSignOut(auth).catch(() => {});
+      }
+    });
+    return () => unsub();
+  }, [user?.uid]);
 
   const initials = useMemo(() => {
     if (!user) return '';
@@ -334,18 +369,20 @@ export default function LandingPage() {
                 title={user && hasActivePlan ? 'You already have a plan' : undefined}
                 aria-disabled={user && hasActivePlan ? 'true' : undefined}
                 onClick={(e) => {
-                  if (blockIfHasPlan(e)) return;
+                  if (user && hasActivePlan) { e.preventDefault(); e.stopPropagation(); return; }
                   if (auth.currentUser) {
                     e.preventDefault();
                     e.stopPropagation();
                     window.location.href = '/billing/checkout?plan=basic';
                   } else {
-                    try {
-                      localStorage.setItem('postSignupNext', '/billing/checkout?plan=basic');
-                    } catch {}
+                    try { localStorage.setItem('postSignupNext', '/billing/checkout?plan=basic'); } catch {}
                   }
                 }}
-                onKeyDown={blockKeyIfHasPlan}
+                onKeyDown={(e) => {
+                  if (user && hasActivePlan && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault(); e.stopPropagation();
+                  }
+                }}
               >
                 Choose Starter
               </button>
@@ -363,18 +400,20 @@ export default function LandingPage() {
                 title={user && hasActivePlan ? 'You already have a plan' : undefined}
                 aria-disabled={user && hasActivePlan ? 'true' : undefined}
                 onClick={(e) => {
-                  if (blockIfHasPlan(e)) return;
+                  if (user && hasActivePlan) { e.preventDefault(); e.stopPropagation(); return; }
                   if (auth.currentUser) {
                     e.preventDefault();
                     e.stopPropagation();
                     window.location.href = '/billing/checkout?plan=pro';
                   } else {
-                    try {
-                      localStorage.setItem('postSignupNext', '/billing/checkout?plan=pro');
-                    } catch {}
+                    try { localStorage.setItem('postSignupNext', '/billing/checkout?plan=pro'); } catch {}
                   }
                 }}
-                onKeyDown={blockKeyIfHasPlan}
+                onKeyDown={(e) => {
+                  if (user && hasActivePlan && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault(); e.stopPropagation();
+                  }
+                }}
               >
                 Choose Pro
               </button>
@@ -392,18 +431,20 @@ export default function LandingPage() {
                 title={user && hasActivePlan ? 'You already have a plan' : undefined}
                 aria-disabled={user && hasActivePlan ? 'true' : undefined}
                 onClick={(e) => {
-                  if (blockIfHasPlan(e)) return;
+                  if (user && hasActivePlan) { e.preventDefault(); e.stopPropagation(); return; }
                   if (auth.currentUser) {
                     e.preventDefault();
                     e.stopPropagation();
                     window.location.href = '/billing/checkout?plan=elite';
                   } else {
-                    try {
-                      localStorage.setItem('postSignupNext', '/billing/checkout?plan=elite');
-                    } catch {}
+                    try { localStorage.setItem('postSignupNext', '/billing/checkout?plan=elite'); } catch {}
                   }
                 }}
-                onKeyDown={blockKeyIfHasPlan}
+                onKeyDown={(e) => {
+                  if (user && hasActivePlan && (e.key === 'Enter' || e.key === ' ')) {
+                    e.preventDefault(); e.stopPropagation();
+                  }
+                }}
               >
                 Choose Unlimited
               </button>

@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { getFirestore, doc, getDoc } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth } from '../lib/firebase/config';
 import ExportPDF from '../components/ExportPDF';
 import Navbar from '../components/Navbar';
@@ -11,6 +11,20 @@ import ReactMarkdown from 'react-markdown';
 import { Toaster, toast as notify } from 'sonner';
 
 const PLAN_LIMITS = { basic: 1, pro: 2, elite: 3 };
+
+// stable per-browser session id
+function getOrCreateSessionId() {
+  try {
+    let id = localStorage.getItem('pp_session_id');
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+      localStorage.setItem('pp_session_id', id);
+    }
+    return id;
+  } catch {
+    return 'fallback-session';
+  }
+}
 
 export default function UtilityPage() {
   const [image1, setImage1] = useState(null);
@@ -75,6 +89,27 @@ export default function UtilityPage() {
       try { localStorage.removeItem('justSignedUp'); } catch {}
     }
   }, [authChecked, user, router]);
+
+  // ---- Single-active-session guard (minimal + safe) ----
+  useEffect(() => {
+    if (!user?.uid) return;
+    const db = getFirestore();
+    const ref = doc(db, 'users', user.uid);
+    const mySessionId = getOrCreateSessionId();
+
+    // Claim (last-login wins)
+    setDoc(ref, { activeSessionId: mySessionId, sessionUpdatedAt: serverTimestamp() }, { merge: true }).catch(() => {});
+
+    // Watch for takeover by another device and sign out here if so
+    const unsub = onSnapshot(ref, (snap) => {
+      const data = snap.exists() ? snap.data() : {};
+      const active = data?.activeSessionId;
+      if (active && active !== mySessionId) {
+        signOut(auth).catch(() => {});
+      }
+    });
+    return () => unsub();
+  }, [user?.uid]);
 
   // Theme toggle (unchanged)
   useEffect(() => {
@@ -204,7 +239,7 @@ export default function UtilityPage() {
   const fileInputBase =
     "w-full cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold";
   const fileInputStyleActive =
-    "file:bg-purple-100 file:text-white hover:file:bg-purple-300";
+    "file:bg-purple-600 file:text-white hover:file:bg-purple-700";
   const fileInputStyleInactive =
     "file:bg-purple-100 file:text-purple-900 hover:file:bg-purple-200";
 

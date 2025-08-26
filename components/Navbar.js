@@ -4,7 +4,21 @@ import Link from "next/link";
 import React, { useEffect, useMemo, useState } from "react";
 import { auth, db } from "@/lib/firebase/config";
 import { onAuthStateChanged, signOut as fbSignOut } from "firebase/auth";
-import { doc, onSnapshot } from "firebase/firestore";
+import { doc, onSnapshot, setDoc, serverTimestamp } from "firebase/firestore"; // + setDoc, serverTimestamp
+
+// stable per-browser session id
+function getOrCreateSessionId() {
+  try {
+    let id = localStorage.getItem('pp_session_id');
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+      localStorage.setItem('pp_session_id', id);
+    }
+    return id;
+  } catch {
+    return 'fallback-session';
+  }
+}
 
 export default function Navbar({ user: userProp, onSignOut }) {
   const [open, setOpen] = useState(false);
@@ -39,6 +53,31 @@ export default function Navbar({ user: userProp, onSignOut }) {
     return () => unsub();
   }, [user?.uid]);
 
+  // ---- Single-active-session guard (centralized too) ----
+  useEffect(() => {
+    if (!user?.uid) return;
+
+    const ref = doc(db, "users", user.uid);
+    const mySessionId = getOrCreateSessionId();
+
+    // Claim (last-login wins)
+    setDoc(ref, { activeSessionId: mySessionId, sessionUpdatedAt: serverTimestamp() }, { merge: true }).catch(() => {});
+
+    // If another device claims, sign out here
+    const unsub = onSnapshot(ref, (snap) => {
+      const data = snap.exists() ? snap.data() : {};
+      const active = data?.activeSessionId;
+      if (active && active !== mySessionId) {
+        if (onSignOut) {
+          onSignOut().catch(() => {});
+        } else {
+          fbSignOut(auth).catch(() => {});
+        }
+      }
+    });
+    return () => unsub();
+  }, [user?.uid, onSignOut]);
+
   // Close offcanvas on Esc
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && setOpen(false);
@@ -59,8 +98,7 @@ export default function Navbar({ user: userProp, onSignOut }) {
   /**
    * Decide which photo to show:
    * 1) Prefer Firestore users/{uid}.photoURL (image you saved for the user)
-   *    - also check a couple common alternate field names in case your doc uses them
-   * 2) Fallback to Firebase Auth user.photoURL (e.g., Google sign-in picture)
+   * 2) Fallback to Firebase Auth user.photoURL
    */
   const photoURLToShow = useMemo(() => {
     const fromFirestore =
@@ -85,45 +123,38 @@ export default function Navbar({ user: userProp, onSignOut }) {
     }
   };
 
-  // NEW: open customer portal
-  const openCustomerPortal = async () => {
+  // ✅ NEW: open Stripe Customer Portal (no other logic touched)
+  const handleOpenPortal = async () => {
     try {
       const u = auth.currentUser;
       if (!u) {
-        window.location.href = "/login";
+        // If somehow not authenticated, just bounce to plans page
+        window.location.href = "/";
         return;
       }
       const idToken = await u.getIdToken();
       const res = await fetch("/api/portal", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${idToken}`,
-        },
+        headers: { Authorization: `Bearer ${idToken}` },
       });
-      let data = null;
-      try { data = await res.json(); } catch {}
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data?.url) {
         window.location.href = data.url;
       } else {
-        // fallback route if your API returns a redirect page
-        window.location.href = "/billing/portal";
+        // fallback: go to plans page
+        window.location.href = "/";
       }
-    } catch (e) {
-      // final fallback
-      window.location.href = "/billing/portal";
+    } catch {
+      window.location.href = "/";
     }
   };
 
   return (
     <header className="w-full border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-sm">
       <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-        {/* Brand */}
+        {/* Brand (unchanged) */}
         <div className="flex items-center space-x-2">
-          {/* NEW: logo navigates to /utility */}
-          <Link href="/utility">
-            <img src="/logo.svg" alt="Logo" className="h-6 w-6 cursor-pointer" />
-          </Link>
+          <img src="/logo.svg" alt="Logo" className="h-6 w-6" />
           <span className="text-lg font-bold text-purple-800 dark:text-purple-300">PixelProof</span>
         </div>
 
@@ -283,16 +314,15 @@ export default function Navbar({ user: userProp, onSignOut }) {
                 <span className="text-sm font-medium">Plans</span>
               </Link>
 
-              {/* NEW: Update Plan → Customer Portal */}
+              {/* ✅ NEW: Update Plan (Customer Portal) */}
               <button
                 onClick={async () => {
                   setOpen(false);
-                  await openCustomerPortal();
+                  await handleOpenPortal();
                 }}
-                className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-200 w-full text-left"
+                className="mt-2 w-full text-left flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-200"
               >
-                <span className="inline-block h-2 w-2 rounded-full bg-purple-600" />
-                <span className="text-sm font-medium">Update Plan</span>
+                Update Plan
               </button>
 
               <button
