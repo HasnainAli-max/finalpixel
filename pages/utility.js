@@ -8,7 +8,6 @@ import ExportPDF from '../components/ExportPDF';
 import Navbar from '../components/Navbar';
 import LoadingSpinner from '../components/LoadingSpinner';
 import ReactMarkdown from 'react-markdown';
-import { Toaster, toast as notify } from 'sonner';
 
 const PLAN_LIMITS = { basic: 1, pro: 2, elite: 3 };
 
@@ -44,6 +43,19 @@ export default function UtilityPage() {
   const [remaining, setRemaining] = useState(null);
 
   const router = useRouter();
+
+  // ---------- Custom Modal State ----------
+  const [modal, setModal] = useState({
+    open: false,
+    title: '',
+    message: '',
+    actions: [], // [{ label: 'Upgrade Plan', onClick: () => {} }]
+  });
+
+  const openModal = ({ title, message, actions = [] }) =>
+    setModal({ open: true, title, message, actions });
+
+  const closeModal = () => setModal((m) => ({ ...m, open: false }));
 
   // Auth guard (no immediate redirect inside the callback)
   useEffect(() => {
@@ -121,31 +133,85 @@ export default function UtilityPage() {
       await signOut(auth);
       router.replace('/login');
     } catch {
-      notify.error('Sign out failed. Please try again.');
+      openModal({
+        title: 'Sign out failed',
+        message: 'We could not sign you out. Please try again.',
+        actions: [
+          { label: 'Try Again', onClick: () => { closeModal(); handleSignOut(); } },
+        ],
+      });
     }
   };
 
+  // -------- Customer Portal helper (used by "Upgrade Plan") --------
+  const goToCustomerPortal = async () => {
+    try {
+      const u = auth.currentUser;
+      if (!u) {
+        closeModal();
+        router.push('/login');
+        return;
+      }
+      const idToken = await u.getIdToken();
+      const res = await fetch('/api/portal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.url) {
+        closeModal();
+        window.location.href = data.url;
+      } else {
+        openModal({
+          title: 'Unable to open portal',
+          message: data?.error || 'We could not open the customer portal. Please try again.',
+          actions: [{ label: 'Try Again', onClick: () => { closeModal(); goToCustomerPortal(); } }],
+        });
+      }
+    } catch (e) {
+      openModal({
+        title: 'Unable to open portal',
+        message: 'A network error occurred. Please check your connection and try again.',
+        actions: [{ label: 'Try Again', onClick: () => { closeModal(); goToCustomerPortal(); } }],
+      });
+    }
+  };
+
+  // ---------- Friendly error helper -> uses modal ----------
   function showFriendlyError({ status, code, msg }) {
     const m = String(msg || '').toLowerCase();
 
     if (status === 401 && /invalid|expired|token|unauthorized/.test(m)) {
-      notify.error('Your session expired. Please sign in again.', {
-        action: { label: 'Sign in', onClick: () => router.push('/login') },
+      openModal({
+        title: 'Session expired',
+        message: 'Your session has expired. Please sign in again to continue.',
+        actions: [
+          { label: 'Sign In', onClick: () => { closeModal(); router.push('/login'); } },
+        ],
       });
       return;
     }
 
     if (code === 'NO_PLAN' || /no active subscription|buy a plan|no active plan/.test(m)) {
-      notify.error("You don't have an active subscription.", {
-        description: 'Choose a plan to run comparisons.',
+      openModal({
+        title: 'No active subscription',
+        message: 'You do not have an active plan. To run comparisons, please choose a plan.',
+        actions: [
+          { label: 'View Plans', onClick: () => { closeModal(); router.push('/'); } },
+        ],
       });
       setRemaining(0);
       return;
     }
 
     if (status === 429 || code === 'LIMIT_EXCEEDED' || /daily limit/.test(m)) {
-      notify.error('Daily limit reached for your plan.', {
-        description: 'Try again tomorrow for more comparisons.',
+      openModal({
+        title: 'Daily limit reached',
+        message: 'You have reached the daily comparison limit for your plan. Upgrade to run more comparisons today.',
+        actions: [
+          // CHANGED: goes to customer portal instead of plans page
+          { label: 'Upgrade Plan', onClick: () => { goToCustomerPortal(); } },
+        ],
       });
       setRemaining(0);
       return;
@@ -153,32 +219,54 @@ export default function UtilityPage() {
 
     if (status === 400) {
       if (/both images are required/i.test(m)) {
-        notify.error('Two images are required.', {
-          description: 'Please upload the design and the development screenshot.',
+        openModal({
+          title: 'Two images required',
+          message: 'Please upload both the design and the development screenshot before starting a comparison.',
+          actions: [
+            { label: 'Got it', onClick: () => { closeModal(); } },
+          ],
         });
         return;
       }
       if (/only jpg|png|webp/i.test(m)) {
-        notify.error('Unsupported image format.', {
-          description: 'Use JPG, PNG, or WEBP files.',
+        openModal({
+          title: 'Unsupported image format',
+          message: 'Use JPG, PNG, or WEBP files (minimum width 500px) for best results.',
+          actions: [
+            { label: 'Got it', onClick: () => { closeModal(); } },
+          ],
         });
         return;
       }
     }
 
     if (/failed to fetch|network/.test(m)) {
-      notify.error('Network issue. Please check your connection and try again.');
+      openModal({
+        title: 'Network issue',
+        message: 'We could not reach the server. Please check your internet connection and try again.',
+        actions: [
+          { label: 'Retry', onClick: () => { closeModal(); /* user can click Start Comparison again */ } },
+        ],
+      });
       return;
     }
 
-    notify.error('We couldn’t complete the comparison.', {
-      description: 'Please try again in a minute.',
+    openModal({
+      title: 'Comparison failed',
+      message: 'We couldn’t complete the comparison. Please try again in a minute.',
+      actions: [
+        { label: 'Retry', onClick: () => { closeModal(); /* user can click Start Comparison again */ } },
+      ],
     });
   }
 
   const handleCompare = async () => {
     if (!image1 || !image2) {
-      notify.info('Please upload both images before comparing.');
+      openModal({
+        title: 'Two images required',
+        message: 'Please upload both the design and the development screenshot before starting a comparison.',
+        actions: [{ label: 'Got it', onClick: () => { closeModal(); } }],
+      });
       return;
     }
 
@@ -222,10 +310,9 @@ export default function UtilityPage() {
       if (!data.result) throw new Error('Comparison result missing in response.');
 
       setComparisonResult(data.result);
-      notify.success('Done! Your visual QA report is ready.');
-
       setRemaining((prev) => (typeof prev === 'number' ? Math.max(prev - 1, 0) : prev));
     } catch (error) {
+      // most cases already handled in showFriendlyError
       console.error('Comparison failed:', error);
     } finally {
       setLoading(false);
@@ -236,12 +323,13 @@ export default function UtilityPage() {
   const hasActivePlan = typeof dailyLimit === 'number' && dailyLimit > 0;
 
   // File input button styling (purple if active plan; unchanged soft purple otherwise)
+  // + change text to white on hover (requested)
   const fileInputBase =
     "w-full cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold";
   const fileInputStyleActive =
-    "file:bg-purple-600 file:text-white hover:file:bg-purple-700";
+    "file:bg-purple-600 file:text-white hover:file:bg-purple-700 hover:file:text-white";
   const fileInputStyleInactive =
-    "file:bg-purple-100 file:text-purple-900 hover:file:bg-purple-200";
+    "file:bg-purple-100 file:text-purple-900 hover:file:bg-purple-200 hover:file:text-white";
 
   const renderPreview = (file) =>
     file ? (
@@ -253,16 +341,11 @@ export default function UtilityPage() {
     ) : null;
 
   if (!user) {
-    return (
-      <>
-        <Toaster richColors position="top-center" closeButton />
-      </>
-    );
+    return <></>;
   }
 
   return (
     <div className="min-h-screen bg-white text-gray-900 dark:bg-gray-900 dark:text-white font-sans">
-      <Toaster richColors position="top-center" closeButton />
       <Navbar user={user} onSignOut={handleSignOut} />
 
       <div className="p-6 max-w-4xl mx-auto">
@@ -315,7 +398,7 @@ export default function UtilityPage() {
           </div>
 
           {/* Upload Dev */}
-          <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg.white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale-[1.01]">
+          <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg.white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale:[1.01]">
             <label className="block font-semibold text-gray-800 dark:text-white mb-2">Upload Development Screenshot</label>
             <input
               type="file"
@@ -369,6 +452,68 @@ export default function UtilityPage() {
           </div>
         )}
       </div>
+
+      {/* ---------- Custom Modal ---------- */}
+      <div
+        className={`fixed inset-0 z-[100] transition-opacity duration-200 ${modal.open ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}
+        onClick={closeModal}
+        aria-hidden={!modal.open}
+      >
+        {/* Backdrop */}
+        <div className="absolute inset-0 bg-black/40" />
+
+        {/* Panel */}
+        <div className="absolute inset-0 flex items-center justify-center p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+            className={`w-full max-w-md rounded-xl bg-white dark:bg-gray-900 shadow-2xl border border-gray-200 dark:border-gray-800 p-5 transform transition-all duration-200
+              ${modal.open ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 translate-y-2'}
+            `}
+          >
+            <div className="flex items-start justify-between mb-3">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{modal.title}</h3>
+              <button
+                onClick={closeModal}
+                aria-label="Close"
+                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300"
+              >
+                {/* X icon */}
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+
+            <p className="text-sm text-gray-700 dark:text-gray-300 mb-5">{modal.message}</p>
+
+            <div className="flex flex-wrap gap-3 justify-end">
+              {modal.actions?.map((a, idx) => (
+                <button
+                  key={idx}
+                  onClick={a.onClick}
+                  className="bg-purple-800 hover:bg-purple-900 text-white px-4 py-2 rounded-lg font-semibold shadow transition"
+                >
+                  {a.label}
+                </button>
+              ))}
+              {/* Default close if no actions */}
+              {(!modal.actions || modal.actions.length === 0) && (
+                <button
+                  onClick={closeModal}
+                  className="bg-purple-800 hover:bg-purple-900 text-white px-4 py-2 rounded-lg font-semibold shadow transition"
+                >
+                  Close
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Modal animation helper (no heavy CSS) */}
+      <style jsx>{``}</style>
     </div>
   );
 }
