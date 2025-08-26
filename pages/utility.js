@@ -197,6 +197,17 @@ export default function UtilityPage() {
     }
   };
 
+  // ---- SUBSCRIPTION-BASED UI STATE ----
+  const hasActivePlan = typeof dailyLimit === 'number' && dailyLimit > 0;
+
+  // File input button styling (purple if active plan; unchanged soft purple otherwise)
+  const fileInputBase =
+    "w-full cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold";
+  const fileInputStyleActive =
+    "file:bg-purple-100 file:text-white hover:file:bg-purple-300";
+  const fileInputStyleInactive =
+    "file:bg-purple-100 file:text-purple-900 hover:file:bg-purple-200";
+
   const renderPreview = (file) =>
     file ? (
       <img
@@ -256,35 +267,55 @@ export default function UtilityPage() {
         </div>
 
         <div className="grid md:grid-cols-2 gap-6">
+          {/* Upload Design */}
           <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg-white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale-[1.01]">
             <label className="block font-semibold text-gray-800 dark:text-white mb-2">Upload Design</label>
             <input
               type="file"
               onChange={(e) => setImage1(e.target.files[0])}
               accept="image/*"
-              className="w-full cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-purple-100 file:text-purple-900 hover:file:bg-purple-200"
+              className={`${fileInputBase} ${hasActivePlan ? fileInputStyleActive : fileInputStyleInactive}`}
             />
             {renderPreview(image1)}
           </div>
 
-          <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg.white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale:[1.01]">
+          {/* Upload Dev */}
+          <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg.white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale-[1.01]">
             <label className="block font-semibold text-gray-800 dark:text-white mb-2">Upload Development Screenshot</label>
             <input
               type="file"
               onChange={(e) => setImage2(e.target.files[0])}
               accept="image/*"
-              className="w-full cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-purple-100 file:text-purple-900 hover:file:bg-purple-200"
+              className={`${fileInputBase} ${hasActivePlan ? fileInputStyleActive : fileInputStyleInactive}`}
             />
             {renderPreview(image2)}
           </div>
         </div>
 
-        <button
-          onClick={handleCompare}
-          className="mt-10 bg-purple-800 hover:bg-purple-900 text-white px-6 py-3 rounded-lg font-semibold shadow transition"
-        >
-          {loading ? 'Comparing...' : 'Start Comparison'}
-        </button>
+        <div className="mt-10 flex items-center gap-4 flex-wrap">
+          <button
+            onClick={handleCompare}
+            disabled={!hasActivePlan || loading}
+            className={`bg-purple-800 hover:bg-purple-900 text-white px-6 py-3 rounded-lg font-semibold shadow transition
+              ${(!hasActivePlan || loading) ? 'opacity-60 cursor-not-allowed' : ''}`}
+          >
+            {loading ? 'Comparing...' : 'Start Comparison'}
+          </button>
+
+          {!hasActivePlan && (
+            <>
+              <span className="text-sm text-red-600">
+                You don&apos;t have plan — first buy the plan.
+              </span>
+              <button
+                onClick={() => router.push('/')}
+                className="bg-purple-800 hover:bg-purple-900 text-white px-4 py-2 rounded-lg font-semibold shadow transition"
+              >
+                Plans
+              </button>
+            </>
+          )}
+        </div>
 
         {loading && <LoadingSpinner />}
 
