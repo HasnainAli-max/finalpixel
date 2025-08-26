@@ -1,0 +1,23 @@
+/* styles/globals.css */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom global styles */
+body {
+  font-family: 'Inter', sans-serif;
+  @apply bg-white text-gray-900 dark:bg-gray-900 dark:text-white;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+button:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.5);
+}
+
+/* Improve file input appearance (optional) */
+input[type='file']::file-selector-button {
+  @apply bg-blue-50 text-blue-700 font-semibold px-4 py-2 rounded cursor-pointer;
+}
+

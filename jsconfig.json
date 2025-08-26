@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    }
+  }
+}
+
+// {
+//   "compilerOptions": {
+//     "allowJs": true,
+//     "checkJs": false,
+//     "baseUrl": "."
+//   },
+//   "typeAcquisition": { "enable": false },
+//   "exclude": ["node_modules"]
+// }
