@@ -11,8 +11,29 @@ export default function Accounts() {
   const router = useRouter();
   const [authUser, setAuthUser] = useState(null);
   const [userDoc, setUserDoc] = useState(null);
-  const [loading, setLoading] = useState(true);
+
+  // Loading controls
+  const [loadingProfile, setLoadingProfile] = useState(true);
+  const [loadingStripe, setLoadingStripe] = useState(true);
+  const loading = loadingProfile || loadingStripe;
+
   const [busy, setBusy] = useState(false);
+
+  // 🔐 Stripe subscription snapshot (Stripe is SOURCE OF TRUTH)
+  const [stripeSub, setStripeSub] = useState({
+    active: false,
+    status: "inactive",
+    plan: null,               // "basic" | "pro" | "elite" | null
+    productName: null,
+    priceId: null,
+    currentPeriodEnd: null,   // unix seconds or millis
+    // optional (if your API returns these)
+    amountCents: null,        // integer cents
+    currency: "usd",          // e.g. 'usd'
+    interval: "month",        // e.g. 'month' | 'year'
+    customerId: null,
+    subscriptionId: null,
+  });
 
   // sign out (same behavior as utility page) + toast
   const handleSignOut = async () => {
@@ -27,7 +48,6 @@ export default function Accounts() {
       );
       router.replace("/login");
     } catch (e) {
-      // toast already shown in promise error handler
       console.error("Sign out failed:", e);
     }
   };
@@ -45,26 +65,73 @@ export default function Accounts() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2) watch the user's Firestore doc (for plan/status/etc.)
+  // 2) watch the user's Firestore doc (profile ONLY; no subscription fields!)
   useEffect(() => {
     if (!authUser?.uid) return;
     const unsub = onSnapshot(
       doc(db, "users", authUser.uid),
       (snap) => {
         setUserDoc(snap.exists() ? snap.data() : null);
-        setLoading(false);
+        setLoadingProfile(false);
       },
       (err) => {
         console.error("Account load error:", err);
         toast.error("Couldn't load your account details. Please refresh.");
-        setLoading(false);
+        setLoadingProfile(false);
       }
     );
     return () => unsub();
   }, [authUser?.uid]);
 
-  // 3) derived values for UI
+  // 3) fetch subscription from Stripe (server route)
+  useEffect(() => {
+    const run = async () => {
+      if (!authUser) return;
+      setLoadingStripe(true);
+      try {
+        const token = await auth.currentUser.getIdToken();
+        const res = await fetch("/api/subscription-status", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { throw new Error(text); }
+
+        if (!res.ok) {
+          console.warn("subscription-status error:", data?.error || res.status);
+          setStripeSub((s) => ({ ...s, active: false, status: "inactive" }));
+        } else {
+          setStripeSub({
+            active: !!data.active,
+            status: data.status || "inactive",
+            plan: data.plan || null,
+            productName: data.productName || null,
+            priceId: data.priceId || null,
+            currentPeriodEnd: data.currentPeriodEnd || null,
+            amountCents: data.amountCents ?? null,   // optional from API
+            currency: (data.currency || "usd").toLowerCase(),
+            interval: data.interval || "month",
+            customerId: data.customerId || null,
+            subscriptionId: data.subscriptionId || null,
+          });
+        }
+      } catch (e) {
+        console.warn("subscription-status fetch failed:", e);
+        setStripeSub((s) => ({ ...s, active: false, status: "inactive" }));
+      } finally {
+        setLoadingStripe(false);
+      }
+    };
+    run();
+  }, [authUser]);
+
+  // 4) derived values for UI (Stripe-first)
   const view = useMemo(() => {
+    // name + emails from profile
     const name =
       userDoc?.displayName ||
       [userDoc?.firstName, userDoc?.lastName].filter(Boolean).join(" ") ||
@@ -72,21 +139,33 @@ export default function Accounts() {
       "—";
 
     const loginEmail = authUser?.email || userDoc?.email || "—";
+    // Prefer Stripe billing email if your API returns it; otherwise use login/profile email
     const billingEmail = userDoc?.stripeCustomer?.email || userDoc?.email || loginEmail;
 
-    const planRaw = userDoc?.activePlan || null;
-    const plan = planRaw ? planRaw.charAt(0).toUpperCase() + planRaw.slice(1) : "No plan";
+    // PLAN from Stripe (fallback to "No plan")
+    const planKey = stripeSub.plan;
+    const plan = planKey ? planKey.charAt(0).toUpperCase() + planKey.slice(1) : "No plan";
 
-    const amount =
-      typeof userDoc?.amount === "number" ? (userDoc.amount / 100).toFixed(2) : "—";
+    // STATUS from Stripe
+    const status = stripeSub.status || "inactive";
 
-    const status = userDoc?.subscriptionStatus || "inactive";
-    const renewDate = formatDate(userDoc?.currentPeriodEnd);
+    // AMOUNT from Stripe (if provided by API), else "—"
+    let amount = "—";
+    if (typeof stripeSub.amountCents === "number") {
+      const dollars = (stripeSub.amountCents / 100).toFixed(2);
+      amount = `$${dollars}`;
+    }
 
-    return { name, loginEmail, billingEmail, plan, amount, status, renewDate };
-  }, [userDoc, authUser]);
+    // RENEW DATE from Stripe currentPeriodEnd
+    const renewDate = formatDate(stripeSub.currentPeriodEnd);
 
-  // 4) open Stripe Customer Portal (intent optional: 'update' | 'cancel')
+    // INTERVAL label (e.g., "/ mo" or "/ yr")
+    const intervalSuffix = stripeSub.interval === "year" ? " / yr" : (stripeSub.interval ? " / mo" : "");
+
+    return { name, loginEmail, billingEmail, plan, amount, status, renewDate, intervalSuffix };
+  }, [userDoc, authUser, stripeSub]);
+
+  // 5) open Stripe Customer Portal (intent optional: 'update' | 'cancel')
   async function openPortal(intent) {
     try {
       setBusy(true);
@@ -107,7 +186,6 @@ export default function Accounts() {
           try { data = JSON.parse(text); } catch { throw new Error(text); }
           if (!res.ok) throw new Error(data.error || "Failed to create portal session");
 
-          // brief success toast then redirect
           setTimeout(() => { window.location.href = data.url; }, 300);
           return "Redirecting to Stripe…";
         })(),
@@ -118,7 +196,6 @@ export default function Accounts() {
         }
       );
     } catch (e) {
-      // toast already shown above
       console.error("openPortal error:", e);
     } finally {
       setBusy(false);
@@ -179,7 +256,7 @@ export default function Accounts() {
             </div>
           </section>
 
-          {/* Plan */}
+          {/* Plan (Stripe-driven) */}
           <aside className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm ring-1 ring-black/5 dark:ring-white/10 p-6">
             <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100 mb-4">Current Plan</h2>
 
@@ -187,7 +264,7 @@ export default function Accounts() {
               <div className="absolute right-3 top-3">
                 <span
                   className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                    view.status === "active"
+                    stripeSub.active
                       ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                       : "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300"
                   }`}
@@ -195,20 +272,28 @@ export default function Accounts() {
                   {view.status}
                 </span>
               </div>
-              <div className="text-slate-800 dark:text-slate-100 font-semibold">{view.plan}</div>
+
+              <div className="text-slate-800 dark:text-slate-100 font-semibold">
+                {view.plan}
+                {stripeSub.productName ? ` — ${stripeSub.productName}` : ""}
+              </div>
+
               <div className="mt-1">
                 <span className="text-3xl font-extrabold text-slate-900 dark:text-white">
-                  {view.amount !== "—" ? `$${view.amount}` : "—"}
+                  {view.amount}
                 </span>
-                {view.amount !== "—" && <span className="text-slate-600 dark:text-slate-300"> / mo</span>}
+                <span className="text-slate-600 dark:text-slate-300">
+                  {view.amount !== "—" ? view.intervalSuffix : ""}
+                </span>
               </div>
+
               <div className="text-slate-600 dark:text-slate-300 text-sm mt-2">
                 {view.renewDate ? `Renews on ${view.renewDate}` : "No renewal scheduled"}
               </div>
             </div>
 
             <div className="space-y-3">
-              {/* Single Update button */}
+              {/* Update plan via Stripe portal */}
               <button
                 type="button"
                 disabled={busy}
@@ -246,7 +331,7 @@ function formatDate(tsLike) {
   if (typeof tsLike === "number") {
     const ms = tsLike > 1e12 ? tsLike : tsLike * 1000;
     return new Date(ms).toLocaleDateString();
-  }
+    }
   const d = new Date(tsLike);
   return isNaN(d) ? "" : d.toLocaleDateString();
 }

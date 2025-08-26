@@ -37,10 +37,14 @@ export default function UtilityPage() {
   // NEW: track when auth listener has fired at least once
   const [authChecked, setAuthChecked] = useState(false);
 
-  // plan/limits UI (display only; server is source of truth)
+  // plan/limits UI (Stripe is source of truth; Firestore is fallback)
   const [planName, setPlanName] = useState(null);
   const [dailyLimit, setDailyLimit] = useState(null);
   const [remaining, setRemaining] = useState(null);
+
+  // NEW: Stripe-driven authority for subscription
+  const [subActive, setSubActive] = useState(false);
+  const [subStatus, setSubStatus] = useState(null);
 
   const router = useRouter();
 
@@ -62,6 +66,7 @@ export default function UtilityPage() {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
+        // Firestore fallback (kept as non-authoritative UI seed)
         try {
           const db = getFirestore();
           const snap = await getDoc(doc(db, 'users', u.uid));
@@ -69,8 +74,8 @@ export default function UtilityPage() {
           const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
           const max = PLAN_LIMITS[rawPlan] ?? 0;
           setPlanName(rawPlan || null);
-          setDailyLimit(max);
-          setRemaining(max);
+          setDailyLimit(max || null);
+          setRemaining(max || null);
         } catch {
           setPlanName(null);
           setDailyLimit(null);
@@ -209,7 +214,7 @@ export default function UtilityPage() {
         title: 'Daily limit reached',
         message: 'You have reached the daily comparison limit for your plan. Upgrade to run more comparisons today.',
         actions: [
-          // CHANGED: goes to customer portal instead of plans page
+          // Goes to customer portal instead of plans page
           { label: 'Upgrade Plan', onClick: () => { goToCustomerPortal(); } },
         ],
       });
@@ -259,6 +264,42 @@ export default function UtilityPage() {
       ],
     });
   }
+
+  // ----- NEW: Ask server (Stripe) for current subscription status -----
+  useEffect(() => {
+    const run = async () => {
+      if (!authChecked || !user) return;
+      try {
+        const idToken = await auth.currentUser.getIdToken();
+        const res = await fetch('/api/subscription-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (res.ok) {
+          // Stripe is the source of truth
+          setSubActive(!!data.active);
+          setSubStatus(data.status || null);
+
+          // If Stripe returned a known plan, adopt its limits; otherwise keep fallback
+          if (data.plan && PLAN_LIMITS[data.plan] != null) {
+            setPlanName(data.plan);
+            setDailyLimit(PLAN_LIMITS[data.plan]);
+            setRemaining(PLAN_LIMITS[data.plan]);
+          }
+
+          // If inactive, keep UI in "no plan" state; if active, restrictions off automatically
+        } else {
+          // Keep fallback but log
+          console.warn('subscription-status error:', data?.error || res.status);
+        }
+      } catch (e) {
+        console.warn('subscription-status fetch failed:', e);
+      }
+    };
+    run();
+  }, [authChecked, user]);
 
   const handleCompare = async () => {
     if (!image1 || !image2) {
@@ -320,10 +361,10 @@ export default function UtilityPage() {
   };
 
   // ---- SUBSCRIPTION-BASED UI STATE ----
-  const hasActivePlan = typeof dailyLimit === 'number' && dailyLimit > 0;
+  // Stripe-active overrides any Firestore fallback:
+  const hasActivePlan = subActive || (typeof dailyLimit === 'number' && dailyLimit > 0);
 
-  // File input button styling (purple if active plan; unchanged soft purple otherwise)
-  // + change text to white on hover (requested)
+  // File input button styling
   const fileInputBase =
     "w-full cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold";
   const fileInputStyleActive =
@@ -372,7 +413,7 @@ export default function UtilityPage() {
               ? `${remaining}/${dailyLimit}`
               : '—'}
           </strong>
-          {planName ? ` (plan: ${planName})` : ''}
+          {planName ? ` (plan: ${planName}${subStatus ? ` • ${subStatus}` : ''})` : (subStatus ? ` (${subStatus})` : '')}
         </p>
 
         <div className="border p-4 rounded bg-gray-50 dark:bg-gray-800 prose dark:prose-invert mb-10">
@@ -398,7 +439,7 @@ export default function UtilityPage() {
           </div>
 
           {/* Upload Dev */}
-          <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg.white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale:[1.01]">
+          <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg-white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale-[1.01]">
             <label className="block font-semibold text-gray-800 dark:text-white mb-2">Upload Development Screenshot</label>
             <input
               type="file"
@@ -420,6 +461,7 @@ export default function UtilityPage() {
             {loading ? 'Comparing...' : 'Start Comparison'}
           </button>
 
+          {/* If NO active subscription, show buy-plan hint + Plans button */}
           {!hasActivePlan && (
             <>
               <span className="text-sm text-red-600">
