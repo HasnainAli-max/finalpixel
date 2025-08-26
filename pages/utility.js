@@ -21,14 +21,17 @@ export default function UtilityPage() {
   const [fileMeta, setFileMeta] = useState({});
   const [user, setUser] = useState(null);
 
+  // NEW: track when auth listener has fired at least once
+  const [authChecked, setAuthChecked] = useState(false);
+
   // plan/limits UI (display only; server is source of truth)
-  const [planName, setPlanName] = useState(null);     // 'basic' | 'pro' | 'elite' | null
-  const [dailyLimit, setDailyLimit] = useState(null); // 1 | 2 | 3 | 0 | null
-  const [remaining, setRemaining] = useState(null);   // starts from dailyLimit
+  const [planName, setPlanName] = useState(null);
+  const [dailyLimit, setDailyLimit] = useState(null);
+  const [remaining, setRemaining] = useState(null);
 
   const router = useRouter();
 
-  // Auth guard + fetch plan for counter display
+  // Auth guard (no immediate redirect inside the callback)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
@@ -49,13 +52,31 @@ export default function UtilityPage() {
         }
       } else {
         setUser(null);
-        router.replace('/login');
       }
+      setAuthChecked(true);
     });
     return () => unsubscribe();
-  }, [router]);
+  }, []);
 
-  // Theme toggle
+  // Redirect decision AFTER auth is checked (flicker-proof)
+  useEffect(() => {
+    if (!authChecked) return;
+
+    if (!user) {
+      let justSignedUp = false;
+      try { justSignedUp = !!localStorage.getItem('justSignedUp'); } catch {}
+      if (justSignedUp) {
+        // skip redirect to /login once; wait for user to hydrate
+        return;
+      }
+      router.replace('/login');
+    } else {
+      // user is present → cleanup the flag if set
+      try { localStorage.removeItem('justSignedUp'); } catch {}
+    }
+  }, [authChecked, user, router]);
+
+  // Theme toggle (unchanged)
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
   }, [darkMode]);
@@ -69,7 +90,6 @@ export default function UtilityPage() {
     }
   };
 
-  // Friendly error helper (no upgrade/downgrade buttons)
   function showFriendlyError({ status, code, msg }) {
     const m = String(msg || '').toLowerCase();
 
@@ -83,7 +103,6 @@ export default function UtilityPage() {
     if (code === 'NO_PLAN' || /no active subscription|buy a plan|no active plan/.test(m)) {
       notify.error("You don't have an active subscription.", {
         description: 'Choose a plan to run comparisons.',
-        // (removed action button)
       });
       setRemaining(0);
       return;
@@ -92,7 +111,6 @@ export default function UtilityPage() {
     if (status === 429 || code === 'LIMIT_EXCEEDED' || /daily limit/.test(m)) {
       notify.error('Daily limit reached for your plan.', {
         description: 'Try again tomorrow for more comparisons.',
-        // (removed upgrade button)
       });
       setRemaining(0);
       return;
@@ -171,11 +189,9 @@ export default function UtilityPage() {
       setComparisonResult(data.result);
       notify.success('Done! Your visual QA report is ready.');
 
-      // Decrement page counter (server still enforces real quota)
       setRemaining((prev) => (typeof prev === 'number' ? Math.max(prev - 1, 0) : prev));
     } catch (error) {
       console.error('Comparison failed:', error);
-      // most cases already handled in showFriendlyError
     } finally {
       setLoading(false);
     }
@@ -220,7 +236,6 @@ export default function UtilityPage() {
           Upload your original design and final build screenshots. Let AI catch visual bugs before your clients do.
         </p>
 
-        {/* Comparison counter on page (not in toasts) */}
         <p className="text-sm text-gray-700 dark:text-gray-300 mb-6">
           Remaining comparisons today:{' '}
           <strong>
@@ -241,7 +256,6 @@ export default function UtilityPage() {
         </div>
 
         <div className="grid md:grid-cols-2 gap-6">
-          {/* Upload Design */}
           <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg-white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale-[1.01]">
             <label className="block font-semibold text-gray-800 dark:text-white mb-2">Upload Design</label>
             <input
@@ -253,8 +267,7 @@ export default function UtilityPage() {
             {renderPreview(image1)}
           </div>
 
-          {/* Upload Dev */}
-          <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg.white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale-[1.01]">
+          <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg.white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale:[1.01]">
             <label className="block font-semibold text-gray-800 dark:text-white mb-2">Upload Development Screenshot</label>
             <input
               type="file"
