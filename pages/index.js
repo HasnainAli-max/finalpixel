@@ -4,6 +4,7 @@ import Link from 'next/link';
 import Head from 'next/head';
 import { auth } from '@/lib/firebase/config';
 import { onAuthStateChanged, signOut as fbSignOut } from 'firebase/auth';
+import { getFirestore, doc, getDoc } from 'firebase/firestore'; // added for plan check
 
 // Public envs (kept as in your file)
 const PRICE_BASIC = process.env.NEXT_PUBLIC_STRIPE_PRICE_BASIC || 'price_basic_xxx';
@@ -15,10 +16,39 @@ export default function LandingPage() {
   const [user, setUser] = useState(null);
   const [open, setOpen] = useState(false);
 
+  // subscription state
+  const [hasActivePlan, setHasActivePlan] = useState(false);
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => setUser(u || null));
     return () => unsub();
   }, []);
+
+  // Read user's plan from Firestore (without changing any other behavior)
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchPlan(u) {
+      try {
+        const db = getFirestore();
+        const snap = await getDoc(doc(db, 'users', u.uid));
+        const d = snap.exists() ? snap.data() : {};
+        const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
+        const active = ['basic', 'pro', 'elite'].includes(rawPlan);
+        if (!cancelled) setHasActivePlan(active);
+      } catch {
+        if (!cancelled) setHasActivePlan(false);
+      }
+    }
+
+    if (user?.uid) {
+      fetchPlan(user);
+    } else {
+      setHasActivePlan(false);
+    }
+
+    return () => { cancelled = true; };
+  }, [user]);
 
   const initials = useMemo(() => {
     if (!user) return '';
@@ -58,6 +88,24 @@ export default function LandingPage() {
     } catch (err) {
       console.error(err);
       alert('Something went wrong starting checkout.');
+    }
+  };
+
+  // Prevent click & keyboard activation without changing styles
+  const blockIfHasPlan = (e) => {
+    if (user && hasActivePlan) {
+      e.preventDefault();
+      e.stopPropagation();
+      return true;
+    }
+    return false;
+  };
+
+  const blockKeyIfHasPlan = (e) => {
+    if (!(user && hasActivePlan)) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
     }
   };
 
@@ -282,18 +330,22 @@ export default function LandingPage() {
             <p className="text-sm text-gray-600 mb-4">100 comparisons / month</p>
             <Link href={`/signup?next=/billing/checkout?plan=basic`}>
               <button
-                className="bg-purple-800 text-white w-full py-2 rounded"
+                className={`bg-purple-800 text-white w-full py-2 rounded ${user && hasActivePlan ? 'opacity-60 cursor-not-allowed' : ''}`}
+                title={user && hasActivePlan ? 'You already have a plan' : undefined}
+                aria-disabled={user && hasActivePlan ? 'true' : undefined}
                 onClick={(e) => {
+                  if (blockIfHasPlan(e)) return;
                   if (auth.currentUser) {
                     e.preventDefault();
                     e.stopPropagation();
                     window.location.href = '/billing/checkout?plan=basic';
                   } else {
                     try {
-                      localStorage.setItem('postSignupNext', '/billing/checkout?plan=basic'); // <- NEW
+                      localStorage.setItem('postSignupNext', '/billing/checkout?plan=basic');
                     } catch {}
                   }
                 }}
+                onKeyDown={blockKeyIfHasPlan}
               >
                 Choose Starter
               </button>
@@ -307,18 +359,22 @@ export default function LandingPage() {
             <p className="text-sm text-gray-600 mb-4">500 comparisons / month</p>
             <Link href={`/signup?next=/billing/checkout?plan=pro`}>
               <button
-                className="bg-purple-800 text-white w-full py-2 rounded"
+                className={`bg-purple-800 text-white w-full py-2 rounded ${user && hasActivePlan ? 'opacity-60 cursor-not-allowed' : ''}`}
+                title={user && hasActivePlan ? 'You already have a plan' : undefined}
+                aria-disabled={user && hasActivePlan ? 'true' : undefined}
                 onClick={(e) => {
+                  if (blockIfHasPlan(e)) return;
                   if (auth.currentUser) {
                     e.preventDefault();
                     e.stopPropagation();
                     window.location.href = '/billing/checkout?plan=pro';
                   } else {
                     try {
-                      localStorage.setItem('postSignupNext', '/billing/checkout?plan=pro'); // <- NEW
+                      localStorage.setItem('postSignupNext', '/billing/checkout?plan=pro');
                     } catch {}
                   }
                 }}
+                onKeyDown={blockKeyIfHasPlan}
               >
                 Choose Pro
               </button>
@@ -332,18 +388,22 @@ export default function LandingPage() {
             <p className="text-sm text-gray-600 mb-4">Unlimited comparisons</p>
             <Link href={`/signup?next=/billing/checkout?plan=elite`}>
               <button
-                className="bg-purple-800 text-white w-full py-2 rounded"
+                className={`bg-purple-800 text-white w-full py-2 rounded ${user && hasActivePlan ? 'opacity-60 cursor-not-allowed' : ''}`}
+                title={user && hasActivePlan ? 'You already have a plan' : undefined}
+                aria-disabled={user && hasActivePlan ? 'true' : undefined}
                 onClick={(e) => {
+                  if (blockIfHasPlan(e)) return;
                   if (auth.currentUser) {
                     e.preventDefault();
                     e.stopPropagation();
                     window.location.href = '/billing/checkout?plan=elite';
                   } else {
                     try {
-                      localStorage.setItem('postSignupNext', '/billing/checkout?plan=elite'); // <- NEW
+                      localStorage.setItem('postSignupNext', '/billing/checkout?plan=elite');
                     } catch {}
                   }
                 }}
+                onKeyDown={blockKeyIfHasPlan}
               >
                 Choose Unlimited
               </button>
