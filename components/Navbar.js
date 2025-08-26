@@ -85,12 +85,45 @@ export default function Navbar({ user: userProp, onSignOut }) {
     }
   };
 
+  // NEW: open customer portal
+  const openCustomerPortal = async () => {
+    try {
+      const u = auth.currentUser;
+      if (!u) {
+        window.location.href = "/login";
+        return;
+      }
+      const idToken = await u.getIdToken();
+      const res = await fetch("/api/portal", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
+      let data = null;
+      try { data = await res.json(); } catch {}
+      if (res.ok && data?.url) {
+        window.location.href = data.url;
+      } else {
+        // fallback route if your API returns a redirect page
+        window.location.href = "/billing/portal";
+      }
+    } catch (e) {
+      // final fallback
+      window.location.href = "/billing/portal";
+    }
+  };
+
   return (
     <header className="w-full border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-sm">
       <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
         {/* Brand */}
         <div className="flex items-center space-x-2">
-          <img src="/logo.svg" alt="Logo" className="h-6 w-6" />
+          {/* NEW: logo navigates to /utility */}
+          <Link href="/utility">
+            <img src="/logo.svg" alt="Logo" className="h-6 w-6 cursor-pointer" />
+          </Link>
           <span className="text-lg font-bold text-purple-800 dark:text-purple-300">PixelProof</span>
         </div>
 
@@ -240,6 +273,7 @@ export default function Navbar({ user: userProp, onSignOut }) {
                 <span className="inline-block h-2 w-2 rounded-full bg-fuchsia-600" />
                 <span className="text-sm font-medium">Contact Us</span>
               </Link>
+
               <Link
                 href="/"
                 className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-200"
@@ -248,6 +282,18 @@ export default function Navbar({ user: userProp, onSignOut }) {
                 <span className="inline-block h-2 w-2 rounded-full bg-fuchsia-600" />
                 <span className="text-sm font-medium">Plans</span>
               </Link>
+
+              {/* NEW: Update Plan → Customer Portal */}
+              <button
+                onClick={async () => {
+                  setOpen(false);
+                  await openCustomerPortal();
+                }}
+                className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-800 dark:text-gray-200 w-full text-left"
+              >
+                <span className="inline-block h-2 w-2 rounded-full bg-purple-600" />
+                <span className="text-sm font-medium">Update Plan</span>
+              </button>
 
               <button
                 onClick={async () => {
