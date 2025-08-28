@@ -4,7 +4,7 @@ import Link from 'next/link';
 import Head from 'next/head';
 import { auth } from '@/lib/firebase/config';
 import { onAuthStateChanged, signOut as fbSignOut } from 'firebase/auth';
-import { getFirestore, doc, getDoc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore'; // + onSnapshot, setDoc, serverTimestamp
+import { getFirestore, doc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore'; // keep for active-session guard
 
 // Public envs (kept as in your file)
 const PRICE_BASIC = process.env.NEXT_PUBLIC_STRIPE_PRICE_BASIC || 'price_basic_xxx';
@@ -30,82 +30,87 @@ export default function LandingPage() {
   const [user, setUser] = useState(null);
   const [open, setOpen] = useState(false);
 
-  // subscription state
+  // subscription state (now driven by Stripe)
   const [hasActivePlan, setHasActivePlan] = useState(false);
-  const [planKnown, setPlanKnown] = useState(false); // NEW: first-read guard to avoid brief enable
+  const [planKnown, setPlanKnown] = useState(false); // first-read guard to avoid brief enable
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => setUser(u || null));
     return () => unsub();
   }, []);
 
-  // Read user's plan from Firestore (real-time) + use cached value to prevent flash
+  // 🔄 Read user's plan from STRIPE (not Firestore) + cache to prevent flash
   useEffect(() => {
-    let unsub = null;
+    let cancelled = false;
 
-    async function initForUser(u) {
-      const db = getFirestore();
-      const ref = doc(db, 'users', u.uid);
-
-      // 1) Prime from cache so we don't briefly enable after an upgrade
-      try {
-        const cached = localStorage.getItem(`pp_has_plan_${u.uid}`);
-        if (cached !== null) {
-          setHasActivePlan(cached === '1');
-          setPlanKnown(true);
-        } else {
-          // If we don't know yet, keep disabled until first snapshot arrives
-          setPlanKnown(false);
-        }
-      } catch {
-        setPlanKnown(false);
+    async function checkStripe() {
+      // logged out → no plan
+      if (!user?.uid) {
+        setHasActivePlan(false);
+        setPlanKnown(true);
+        return;
       }
 
-      // 2) Live subscribe
-      unsub = onSnapshot(
-        ref,
-        (snap) => {
-          const d = snap.exists() ? snap.data() : {};
-          const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
-          const active = ['basic', 'pro', 'elite'].includes(rawPlan);
+      // 1) Prime from cache so UI doesn't flash
+      try {
+        const cached = localStorage.getItem(`pp_has_plan_${user.uid}`);
+        if (cached !== null) {
+          if (!cancelled) {
+            setHasActivePlan(cached === '1');
+            setPlanKnown(true);
+          }
+        } else {
+          if (!cancelled) setPlanKnown(false);
+        }
+      } catch {
+        if (!cancelled) setPlanKnown(false);
+      }
+
+      // 2) Live fetch from server → /api/subscription-status
+      try {
+        const token = await auth.currentUser.getIdToken();
+        const res = await fetch('/api/subscription-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        });
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = {}; }
+
+        const active = !!data?.active; // server already applies statuses (active/trialing/past_due/unpaid)
+        if (!cancelled) {
           setHasActivePlan(active);
           setPlanKnown(true);
-          try {
-            localStorage.setItem(`pp_has_plan_${u.uid}`, active ? '1' : '0');
-          } catch {}
-        },
-        async () => {
-          // Fallback to one-time read if snapshot errors
-          try {
-            const one = await getDoc(ref);
-            const d = one.exists() ? one.data() : {};
-            const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
-            const active = ['basic', 'pro', 'elite'].includes(rawPlan);
-            setHasActivePlan(active);
-            setPlanKnown(true);
-            try {
-              localStorage.setItem(`pp_has_plan_${u.uid}`, active ? '1' : '0');
-            } catch {}
-          } catch {
+          try { localStorage.setItem(`pp_has_plan_${user.uid}`, active ? '1' : '0'); } catch {}
+        }
+      } catch (e) {
+        // network/API failure → if we had no cache, default to disabled=false (no plan)
+        if (!cancelled) {
+          if (!planKnown) {
             setHasActivePlan(false);
             setPlanKnown(true);
           }
+          // optional: console.warn('subscription-status fetch failed:', e);
         }
-      );
+      }
     }
 
-    if (user?.uid) {
-      initForUser(user);
-    } else {
-      // logged out
-      setHasActivePlan(false);
-      setPlanKnown(true);
-    }
+    checkStripe();
 
-    return () => unsub && unsub();
-  }, [user]);
+    // optional: re-check when tab becomes visible (user may upgrade in portal)
+    const onVis = () => {
+      if (document.visibilityState === 'visible') checkStripe();
+    };
+    document.addEventListener('visibilitychange', onVis);
 
-  // ---- Single-active-session guard (minimal + safe) ----
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVis);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid]);
+
+  // ---- Single-active-session guard (unchanged) ----
   useEffect(() => {
     if (!user?.uid) return;
     const db = getFirestore();
@@ -167,7 +172,7 @@ export default function LandingPage() {
     }
   };
 
-  // Disable logic:
+  // Disable logic (unchanged):
   // - If user is logged in and plan is KNOWN → disable only when hasActivePlan
   // - If user is logged in and plan is NOT KNOWN YET (first paint) → keep disabled to avoid brief enable
   const shouldDisableForUser = (user && (!planKnown || hasActivePlan));
