@@ -1,4 +1,3 @@
-// pages/billing/success.js
 "use client";
 
 import Head from "next/head";
@@ -21,16 +20,39 @@ export default function SuccessPage() {
   }, []);
 
   useEffect(() => {
-    // Optional: ping your status endpoint to sync Firestore after success
+    // After payment: ping status endpoint(s) and broadcast "refresh" to other tabs/pages
     (async () => {
       try {
         if (!userReady || !auth.currentUser) return;
         const token = await auth.currentUser.getIdToken();
+
+        // Optional legacy ping (GET)
         await fetch("/api/subscription/status", {
           method: "GET",
           headers: { Authorization: `Bearer ${token}` },
         });
-        // Friendly toast
+
+        // Preferred: same endpoint other pages use (POST) + disable cache
+        try {
+          await fetch("/api/subscription-status", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+              "Cache-Control": "no-cache",
+              "Pragma": "no-cache",
+            },
+            cache: "no-store",
+          });
+        } catch {}
+
+        // 🔔 Tell other tabs/pages (Accounts, Utility) to refetch now
+        try {
+          const bc = new BroadcastChannel("pp-billing-sync");
+          bc.postMessage("refresh");
+          bc.close();
+        } catch {}
+
         toast.success("Payment completed! Your subscription is active.");
       } catch {
         // Non-blocking
@@ -79,13 +101,6 @@ export default function SuccessPage() {
                 View Account
               </Link>
             </div>
-
-            {/* Back home */}
-            {/* <div className="mt-4">
-              <Link href="/" className="text-sm text-purple-700 dark:text-purple-300 hover:underline">
-                Return to homepage
-              </Link>
-            </div> */}
           </div>
         </div>
       </main>

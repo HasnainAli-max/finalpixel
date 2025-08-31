@@ -74,7 +74,7 @@ export default function Accounts() {
     return () => unsub();
   }, [authUser?.uid]);
 
-  // 3) fetch subscription from Stripe (server route) — factored so we can call it anywhere
+  // 3) fetch subscription from Stripe (server route)
   const fetchingRef = useRef(false);
   const fetchStripeStatus = async () => {
     if (!authUser || fetchingRef.current) return;
@@ -87,7 +87,11 @@ export default function Accounts() {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          // 🚫 caching
+          "Cache-Control": "no-cache",
+          "Pragma": "no-cache",
         },
+        cache: "no-store",
       });
       const text = await res.text();
       let data;
@@ -126,7 +130,7 @@ export default function Accounts() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser]);
 
-  // instant refresh: listen for global billing sync + refetch on tab focus
+  // instant refresh: broadcast listener + refetch on tab focus/visibility
   useEffect(() => {
     // BroadcastChannel (checkout success page or other tabs will ping this)
     let bc;
@@ -143,10 +147,14 @@ export default function Accounts() {
       if (document.visibilityState === "visible") fetchStripeStatus();
     };
     document.addEventListener("visibilitychange", onVis);
+    // explicit focus event also helps on some browsers
+    const onFocus = () => fetchStripeStatus();
+    window.addEventListener("focus", onFocus);
 
     return () => {
       if (bc) bc.close();
       document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onFocus);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -176,7 +184,6 @@ export default function Accounts() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ intent }),
       });
 
       const text = await res.text();

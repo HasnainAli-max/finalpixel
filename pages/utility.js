@@ -1,5 +1,4 @@
-// pages/utility.js
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/router';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { getFirestore, doc, getDoc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore';
@@ -265,9 +264,7 @@ export default function UtilityPage() {
         openModal({
           title: 'Two images required',
           message: 'Please upload both the design and the development screenshot before starting a comparison.',
-          actions: [
-            { label: 'Got it', onClick: () => { closeModal(); } },
-          ],
+          actions: [{ label: 'Got it', onClick: () => { closeModal(); } }],
         });
         return;
       }
@@ -275,9 +272,7 @@ export default function UtilityPage() {
         openModal({
           title: 'Unsupported image format',
           message: 'Use JPG, PNG, or WEBP files (minimum width 500px) for best results.',
-          actions: [
-            { label: 'Got it', onClick: () => { closeModal(); } },
-          ],
+          actions: [{ label: 'Got it', onClick: () => { closeModal(); } }],
         });
         return;
       }
@@ -287,9 +282,7 @@ export default function UtilityPage() {
       openModal({
         title: 'Network issue',
         message: 'We could not reach the server. Please check your internet connection and try again.',
-        actions: [
-          { label: 'Retry', onClick: () => { closeModal(); } },
-        ],
+        actions: [{ label: 'Retry', onClick: () => { closeModal(); } }],
       });
       return;
     }
@@ -303,45 +296,80 @@ export default function UtilityPage() {
     });
   }
 
-  // ----- Ask server (Stripe) for current subscription status -----
-  useEffect(() => {
-    const run = async () => {
-      if (!authChecked || !user) return;
-      try {
-        const idToken = await auth.currentUser.getIdToken();
-        const res = await fetch('/api/subscription-status', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
-        });
-        const data = await res.json().catch(() => ({}));
+  // ----- Ask server (Stripe) for current subscription status ----- (refetchable)
+  const fetchSubStatus = useCallback(async () => {
+    if (!authChecked || !user) return;
+    try {
+      const idToken = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/subscription-status', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+          // 🚫 caching
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+        },
+        cache: 'no-store',
+      });
+      const data = await res.json().catch(() => ({}));
 
-        if (res.ok) {
-          setSubActive(!!data.active);
-          setSubStatus(data.status || null);
+      if (res.ok) {
+        setSubActive(!!data.active);
+        setSubStatus(data.status || null);
 
-          // cache result to avoid refresh flicker later
-          try {
-            localStorage.setItem(
-              subCacheKey(user.uid),
-              JSON.stringify({ active: !!data.active, plan: data.plan || null, status: data.status || null, t: Date.now() })
-            );
-          } catch {}
+        // cache result to avoid refresh flicker later
+        try {
+          localStorage.setItem(
+            subCacheKey(user.uid),
+            JSON.stringify({ active: !!data.active, plan: data.plan || null, status: data.status || null, t: Date.now() })
+          );
+        } catch {}
 
-          if (data.plan && PLAN_LIMITS[data.plan] != null) {
-            setPlanName(data.plan);
-            setDailyLimit(PLAN_LIMITS[data.plan]);
-          }
-        } else {
-          console.warn('subscription-status error:', data?.error || res.status);
+        if (data.plan && PLAN_LIMITS[data.plan] != null) {
+          setPlanName(data.plan);
+          setDailyLimit(PLAN_LIMITS[data.plan]);
         }
-      } catch (e) {
-        console.warn('subscription-status fetch failed:', e);
-      } finally {
-        setSubChecked(true);
+      } else {
+        console.warn('subscription-status error:', data?.error || res.status);
       }
-    };
-    run();
+    } catch (e) {
+      console.warn('subscription-status fetch failed:', e);
+    } finally {
+      setSubChecked(true);
+    }
   }, [authChecked, user]);
+
+  // initial fetch
+  useEffect(() => {
+    fetchSubStatus();
+  }, [fetchSubStatus]);
+
+  // Refetch on broadcast + tab focus/visibility (instant after Stripe return)
+  useEffect(() => {
+    // 🔔 listen for billing-sync broadcasts (sent from /billing/success)
+    let bc;
+    try {
+      bc = new BroadcastChannel('pp-billing-sync');
+      bc.addEventListener('message', (ev) => {
+        if (ev?.data === 'refresh') fetchSubStatus();
+      });
+    } catch {}
+
+    // Refetch when tab becomes visible or gains focus
+    const onVis = () => {
+      if (document.visibilityState === 'visible') fetchSubStatus();
+    };
+    const onFocus = () => fetchSubStatus();
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onFocus);
+
+    return () => {
+      if (bc) bc.close();
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [fetchSubStatus]);
 
   // ----- Initialize/persist remaining whenever plan/limit ready -----
   useEffect(() => {
