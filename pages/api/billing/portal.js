@@ -56,7 +56,7 @@ export default async function handler(req, res) {
     }
 
     // 4) Compute a safe return URL (env → request host → final fallback)
-    const envOrigin = (process.env.NEXT_PUBLIC_SITE_URL || process.env.APP_URL || "").trim();
+    const envOrigin = ("https://finalpixel.vercel.app" || "").trim();
     const headerOrigin = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}`;
     const origin = envOrigin
       ? envOrigin.replace(/\/$/, "")

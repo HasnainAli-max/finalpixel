@@ -28,7 +28,7 @@ export default async function handler(req, res) {
     const customerId = await findOrCreateCustomerByEmail(email, decoded.uid);
 
     // Use env base URL if present; fallback to finalpixel
-    const base = (process.env.NEXT_PUBLIC_SITE_URL || process.env.APP_URL || "https://finalpixel.vercel.app")
+    const base = ("https://finalpixel.vercel.app")
       .toString()
       .replace(/\/$/, "");
 

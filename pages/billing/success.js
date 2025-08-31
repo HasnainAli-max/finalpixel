@@ -3,7 +3,7 @@
 
 import Head from "next/head";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import { auth } from "@/lib/firebase/config";
 import { Toaster, toast } from "sonner";
@@ -13,61 +13,29 @@ export default function SuccessPage() {
   const { session_id } = router.query;
 
   const [userReady, setUserReady] = useState(false);
-  const bcRef = useRef(null);
 
-  // Ensure auth is initialized before allowing actions
   useEffect(() => {
+    // Ensure auth is initialized before allowing actions
     const unsub = auth.onAuthStateChanged(() => setUserReady(true));
     return () => unsub();
   }, []);
 
-  // Helper: mark plan active locally + notify other tabs/pages immediately
-  const markPlanActiveLocally = () => {
-    const uid = auth.currentUser?.uid;
-    if (!uid) return;
-
-    // 1) Cache for first-paint gating on other pages
-    try {
-      localStorage.setItem(`pp_has_plan_${uid}`, "1");
-    } catch {}
-
-    // 2) Broadcast so already-mounted pages flip instantly
-    try {
-      if (!bcRef.current && "BroadcastChannel" in window) {
-        bcRef.current = new BroadcastChannel("pp_billing");
-      }
-      bcRef.current?.postMessage({ type: "plan-active", uid });
-    } catch {}
-  };
-
-  // Optional: ping your status endpoint to sync server state
   useEffect(() => {
+    // Optional: ping your status endpoint to sync Firestore after success
     (async () => {
       try {
         if (!userReady || !auth.currentUser) return;
-
-        // Immediately mark active so UI elsewhere updates now (no refresh needed)
-        markPlanActiveLocally();
-
-        // Keep your existing ping (non-blocking). If your endpoint is different in prod,
-        // keep it as-is to avoid breaking anything.
         const token = await auth.currentUser.getIdToken();
         await fetch("/api/subscription/status", {
           method: "GET",
           headers: { Authorization: `Bearer ${token}` },
         });
-
+        // Friendly toast
         toast.success("Payment completed! Your subscription is active.");
       } catch {
-        // Non-blocking — UI already updated via localStorage/BroadcastChannel
+        // Non-blocking
       }
     })();
-
-    return () => {
-      try {
-        bcRef.current?.close?.();
-      } catch {}
-    };
   }, [userReady]);
 
   return (
@@ -95,6 +63,7 @@ export default function SuccessPage() {
               Thank you for subscribing to PixelProof. Your account has been upgraded.
             </p>
 
+            {/* Optional info row */}
             {session_id ? (
               <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
                 Ref: <span className="font-mono">{session_id}</span>
@@ -103,19 +72,20 @@ export default function SuccessPage() {
 
             {/* Actions */}
             <div className="mt-6 flex flex-col sm:flex-row gap-3 justify-center">
-              <Link
-                href="/utility"
-                className="inline-flex justify-center items-center rounded-xl bg-purple-700 text-white px-5 h-11 font-medium hover:brightness-110"
-              >
+              <Link href="/utility" className="inline-flex justify-center items-center rounded-xl bg-purple-700 text-white px-5 h-11 font-medium hover:brightness-110">
                 Go to Home
               </Link>
-              <Link
-                href="/accounts"
-                className="inline-flex justify-center items-center rounded-xl border border-slate-300 dark:border-slate-700 px-5 h-11 font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
-              >
+              <Link href="/accounts" className="inline-flex justify-center items-center rounded-xl border border-slate-300 dark:border-slate-700 px-5 h-11 font-medium hover:bg-slate-50 dark:hover:bg-slate-800">
                 View Account
               </Link>
             </div>
+
+            {/* Back home */}
+            {/* <div className="mt-4">
+              <Link href="/" className="text-sm text-purple-700 dark:text-purple-300 hover:underline">
+                Return to homepage
+              </Link>
+            </div> */}
           </div>
         </div>
       </main>

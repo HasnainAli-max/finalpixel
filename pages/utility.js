@@ -25,6 +25,21 @@ function getOrCreateSessionId() {
   }
 }
 
+// --- helpers for local caching ---
+function todayStr() {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+function remainingKey(uid, plan) {
+  const planSafe = plan || 'none';
+  return `pp_remaining_${uid}_${planSafe}_${todayStr()}`;
+}
+function subCacheKey(uid) {
+  return `pp_sub_cache_${uid}`;
+}
+
 export default function UtilityPage() {
   const [image1, setImage1] = useState(null);
   const [image2, setImage2] = useState(null);
@@ -34,20 +49,21 @@ export default function UtilityPage() {
   const [fileMeta, setFileMeta] = useState({});
   const [user, setUser] = useState(null);
 
-  // auth state
+  // NEW: track when auth listener has fired at least once
   const [authChecked, setAuthChecked] = useState(false);
 
-  // plan/limits UI (Firestore seed; Stripe is authority)
+  // plan/limits UI (Stripe is source of truth; Firestore is fallback)
   const [planName, setPlanName] = useState(null);
   const [dailyLimit, setDailyLimit] = useState(null);
   const [remaining, setRemaining] = useState(null);
 
-  // Stripe-driven authority
+  // Stripe-driven authority for subscription
   const [subActive, setSubActive] = useState(false);
   const [subStatus, setSubStatus] = useState(null);
 
-  // NEW: avoid “no plan” flash until we actually know
-  const [planKnown, setPlanKnown] = useState(false);
+  // flags to avoid flicker of "no plan" block
+  const [fsLoaded, setFsLoaded] = useState(false);
+  const [subChecked, setSubChecked] = useState(false);
 
   const router = useRouter();
 
@@ -56,7 +72,7 @@ export default function UtilityPage() {
     open: false,
     title: '',
     message: '',
-    actions: [],
+    actions: [], // [{ label: 'Upgrade Plan', onClick: () => {} }]
   });
 
   const openModal = ({ title, message, actions = [] }) =>
@@ -64,28 +80,44 @@ export default function UtilityPage() {
 
   const closeModal = () => setModal((m) => ({ ...m, open: false }));
 
-  // Auth guard (no immediate redirect inside the callback)
+  // Auth guard + seed from local cache immediately (no flicker)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
-        // Firestore fallback (non-authoritative seed)
+
+        // 1) Seed quickly from local cache if available (prevents "no plan" flash)
+        try {
+          const raw = localStorage.getItem(subCacheKey(u.uid));
+          if (raw) {
+            const cache = JSON.parse(raw);
+            if (typeof cache?.active === 'boolean') {
+              setSubActive(!!cache.active);
+            }
+            if (cache?.plan && PLAN_LIMITS[cache.plan] != null) {
+              setPlanName(cache.plan);
+              setDailyLimit(PLAN_LIMITS[cache.plan]);
+            }
+          }
+        } catch {}
+
+        // 2) Firestore fallback seed
         try {
           const db = getFirestore();
           const snap = await getDoc(doc(db, 'users', u.uid));
           const d = snap.exists() ? snap.data() : {};
           const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
           const max = PLAN_LIMITS[rawPlan] ?? 0;
-          setPlanName(rawPlan || null);
-          setDailyLimit(max || null);
-          setRemaining(max || null);
+          setPlanName((p) => p || rawPlan || null); // don't overwrite cache if it already set
+          if (max) setDailyLimit((dl) => (typeof dl === 'number' ? dl : max));
         } catch {
-          setPlanName(null);
-          setDailyLimit(null);
-          setRemaining(null);
+          // ignore
+        } finally {
+          setFsLoaded(true);
         }
       } else {
         setUser(null);
+        setFsLoaded(true);
       }
       setAuthChecked(true);
     });
@@ -113,7 +145,10 @@ export default function UtilityPage() {
     const ref = doc(db, 'users', user.uid);
     const mySessionId = getOrCreateSessionId();
 
+    // Claim (last-login wins)
     setDoc(ref, { activeSessionId: mySessionId, sessionUpdatedAt: serverTimestamp() }, { merge: true }).catch(() => {});
+
+    // Watch for takeover by another device and sign out here if so
     const unsub = onSnapshot(ref, (snap) => {
       const data = snap.exists() ? snap.data() : {};
       const active = data?.activeSessionId;
@@ -137,12 +172,14 @@ export default function UtilityPage() {
       openModal({
         title: 'Sign out failed',
         message: 'We could not sign you out. Please try again.',
-        actions: [{ label: 'Try Again', onClick: () => { closeModal(); handleSignOut(); } }],
+        actions: [
+          { label: 'Try Again', onClick: () => { closeModal(); handleSignOut(); } },
+        ],
       });
     }
   };
 
-  // -------- Customer Portal helper --------
+  // -------- Customer Portal helper (used by "Upgrade Plan") --------
   const goToCustomerPortal = async () => {
     try {
       const u = auth.currentUser;
@@ -180,11 +217,21 @@ export default function UtilityPage() {
   function showFriendlyError({ status, code, msg }) {
     const m = String(msg || '').toLowerCase();
 
+    // helper to persist remaining whenever we set it here
+    const persistRemaining = (val) => {
+      setRemaining(val);
+      try {
+        if (user?.uid) localStorage.setItem(remainingKey(user.uid, planName), String(val));
+      } catch {}
+    };
+
     if (status === 401 && /invalid|expired|token|unauthorized/.test(m)) {
       openModal({
         title: 'Session expired',
         message: 'Your session has expired. Please sign in again to continue.',
-        actions: [{ label: 'Sign In', onClick: () => { closeModal(); router.push('/login'); } }],
+        actions: [
+          { label: 'Sign In', onClick: () => { closeModal(); router.push('/login'); } },
+        ],
       });
       return;
     }
@@ -193,9 +240,11 @@ export default function UtilityPage() {
       openModal({
         title: 'No active subscription',
         message: 'You do not have an active plan. To run comparisons, please choose a plan.',
-        actions: [{ label: 'View Plans', onClick: () => { closeModal(); router.push('/'); } }],
+        actions: [
+          { label: 'View Plans', onClick: () => { closeModal(); router.push('/'); } },
+        ],
       });
-      setRemaining(0);
+      persistRemaining(0);
       return;
     }
 
@@ -203,9 +252,11 @@ export default function UtilityPage() {
       openModal({
         title: 'Daily limit reached',
         message: 'You have reached the daily comparison limit for your plan. Upgrade to run more comparisons today.',
-        actions: [{ label: 'Upgrade Plan', onClick: () => { goToCustomerPortal(); } }],
+        actions: [
+          { label: 'Upgrade Plan', onClick: () => { goToCustomerPortal(); } },
+        ],
       });
-      setRemaining(0);
+      persistRemaining(0);
       return;
     }
 
@@ -214,7 +265,9 @@ export default function UtilityPage() {
         openModal({
           title: 'Two images required',
           message: 'Please upload both the design and the development screenshot before starting a comparison.',
-          actions: [{ label: 'Got it', onClick: () => { closeModal(); } }],
+          actions: [
+            { label: 'Got it', onClick: () => { closeModal(); } },
+          ],
         });
         return;
       }
@@ -222,7 +275,9 @@ export default function UtilityPage() {
         openModal({
           title: 'Unsupported image format',
           message: 'Use JPG, PNG, or WEBP files (minimum width 500px) for best results.',
-          actions: [{ label: 'Got it', onClick: () => { closeModal(); } }],
+          actions: [
+            { label: 'Got it', onClick: () => { closeModal(); } },
+          ],
         });
         return;
       }
@@ -232,7 +287,9 @@ export default function UtilityPage() {
       openModal({
         title: 'Network issue',
         message: 'We could not reach the server. Please check your internet connection and try again.',
-        actions: [{ label: 'Retry', onClick: () => { closeModal(); } }],
+        actions: [
+          { label: 'Retry', onClick: () => { closeModal(); } },
+        ],
       });
       return;
     }
@@ -240,49 +297,16 @@ export default function UtilityPage() {
     openModal({
       title: 'Comparison failed',
       message: 'We couldn’t complete the comparison. Please try again in a minute.',
-      actions: [{ label: 'Retry', onClick: () => { closeModal(); } }],
+      actions: [
+        { label: 'Retry', onClick: () => { closeModal(); } },
+      ],
     });
   }
 
-  // ----- NEW: Real-time subscription detection (Stripe authority) -----
+  // ----- Ask server (Stripe) for current subscription status -----
   useEffect(() => {
-    let cancelled = false;
-    if (!authChecked || !user?.uid) {
-      setSubActive(false);
-      setSubStatus(null);
-      setPlanKnown(!!authChecked); // if we know not logged in → we “know”
-      return;
-    }
-
-    const cacheKey = `pp_has_plan_${user.uid}`;
-
-    const apply = (active, status, plan) => {
-      if (cancelled) return;
-      setSubActive(!!active);
-      if (status != null) setSubStatus(status || null);
-      if (plan && PLAN_LIMITS[plan] != null) {
-        setPlanName(plan);
-        setDailyLimit(PLAN_LIMITS[plan]);
-        setRemaining(prev => (typeof prev === 'number' ? Math.min(prev, PLAN_LIMITS[plan]) : PLAN_LIMITS[plan]));
-      }
-      try { localStorage.setItem(cacheKey, active ? '1' : '0'); } catch {}
-    };
-
-    // 1) Prime from cache to avoid “no plan” flash
-    try {
-      const cached = localStorage.getItem(cacheKey);
-      if (cached !== null) {
-        apply(cached === '1');
-        setPlanKnown(true);
-      } else {
-        setPlanKnown(false);
-      }
-    } catch {
-      setPlanKnown(false);
-    }
-
-    // 2) Live fetch from server
-    const fetchStatus = async () => {
+    const run = async () => {
+      if (!authChecked || !user) return;
       try {
         const idToken = await auth.currentUser.getIdToken();
         const res = await fetch('/api/subscription-status', {
@@ -290,67 +314,52 @@ export default function UtilityPage() {
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
         });
         const data = await res.json().catch(() => ({}));
+
         if (res.ok) {
-          apply(!!data.active, data.status || null, data.plan || null);
-          setPlanKnown(true);
-          return !!data.active;
-        }
-      } catch {}
-      // leave known state as-is on failure
-      return null;
-    };
+          setSubActive(!!data.active);
+          setSubStatus(data.status || null);
 
-    fetchStatus();
+          // cache result to avoid refresh flicker later
+          try {
+            localStorage.setItem(
+              subCacheKey(user.uid),
+              JSON.stringify({ active: !!data.active, plan: data.plan || null, status: data.status || null, t: Date.now() })
+            );
+          } catch {}
 
-    // 3) Re-check when tab becomes visible (user may upgrade in portal)
-    const onVis = () => {
-      if (document.visibilityState === 'visible') fetchStatus();
-    };
-    document.addEventListener('visibilitychange', onVis);
-
-    // 4) Listen for localStorage changes (other tabs/success page)
-    const onStorage = (e) => {
-      if (e.key === cacheKey) {
-        apply(e.newValue === '1');
-        setPlanKnown(true);
-      }
-    };
-    window.addEventListener('storage', onStorage);
-
-    // 5) BroadcastChannel for instant same-tab updates from success page
-    let bc;
-    try {
-      if ('BroadcastChannel' in window) {
-        bc = new BroadcastChannel('pp_billing');
-        bc.addEventListener('message', (ev) => {
-          if (ev?.data?.type === 'plan-active' && ev.data.uid === user.uid) {
-            apply(true, 'active');
-            setPlanKnown(true);
+          if (data.plan && PLAN_LIMITS[data.plan] != null) {
+            setPlanName(data.plan);
+            setDailyLimit(PLAN_LIMITS[data.plan]);
           }
-        });
-      }
-    } catch {}
-
-    // 6) Brief polling right after return (covers webhook lag)
-    let tries = 0;
-    let pollTimer;
-    const startPoll = async () => {
-      const ok = await fetchStatus();
-      if (ok) return; // became active
-      if (++tries < 10) {
-        pollTimer = setTimeout(startPoll, 3000); // up to ~30s
+        } else {
+          console.warn('subscription-status error:', data?.error || res.status);
+        }
+      } catch (e) {
+        console.warn('subscription-status fetch failed:', e);
+      } finally {
+        setSubChecked(true);
       }
     };
-    startPoll();
+    run();
+  }, [authChecked, user]);
 
-    return () => {
-      cancelled = true;
-      document.removeEventListener('visibilitychange', onVis);
-      window.removeEventListener('storage', onStorage);
-      if (bc) bc.close?.();
-      if (pollTimer) clearTimeout(pollTimer);
-    };
-  }, [authChecked, user?.uid]);
+  // ----- Initialize/persist remaining whenever plan/limit ready -----
+  useEffect(() => {
+    if (!user?.uid) return;
+    if (typeof dailyLimit !== 'number') return;
+
+    // load from localStorage (per day, per plan). If none, seed with full dailyLimit.
+    try {
+      const key = remainingKey(user.uid, planName);
+      const raw = localStorage.getItem(key);
+      const stored = raw != null ? parseInt(raw, 10) : NaN;
+      const next = Number.isFinite(stored) ? Math.max(0, Math.min(dailyLimit, stored)) : dailyLimit;
+      setRemaining(next);
+      localStorage.setItem(key, String(next)); // ensure it exists for future refreshes
+    } catch {
+      setRemaining(dailyLimit);
+    }
+  }, [user?.uid, planName, dailyLimit]);
 
   const handleCompare = async () => {
     if (!image1 || !image2) {
@@ -367,6 +376,7 @@ export default function UtilityPage() {
 
     try {
       const token = await auth.currentUser.getIdToken();
+
       const formData = new FormData();
       formData.append('image1', image1);
       formData.append('image2', image2);
@@ -385,7 +395,11 @@ export default function UtilityPage() {
 
       const raw = await response.text();
       let data;
-      try { data = JSON.parse(raw); } catch { data = { error: raw || 'Unknown server response' }; }
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = { error: raw || 'Unknown server response' };
+      }
 
       if (!response.ok) {
         const code = data?.error_code || '';
@@ -397,7 +411,17 @@ export default function UtilityPage() {
       if (!data.result) throw new Error('Comparison result missing in response.');
 
       setComparisonResult(data.result);
-      setRemaining((prev) => (typeof prev === 'number' ? Math.max(prev - 1, 0) : prev));
+
+      // decrement + persist remaining locally
+      setRemaining((prev) => {
+        const next = typeof prev === 'number'
+          ? Math.max(prev - 1, 0)
+          : (typeof dailyLimit === 'number' ? Math.max(dailyLimit - 1, 0) : 0);
+        try {
+          if (user?.uid) localStorage.setItem(remainingKey(user.uid, planName), String(next));
+        } catch {}
+        return next;
+      });
     } catch (error) {
       console.error('Comparison failed:', error);
     } finally {
@@ -406,9 +430,9 @@ export default function UtilityPage() {
   };
 
   // ---- SUBSCRIPTION-BASED UI STATE ----
-  // Stripe-active overrides any fallback. Only show “no plan” when we KNOW.
   const hasActivePlan = subActive || (typeof dailyLimit === 'number' && dailyLimit > 0);
-  const showNoPlanBlock = planKnown && !hasActivePlan;
+  // Only show the "no plan" UI once at least one backend check has finished
+  const showNoPlanUI = (!hasActivePlan) && (fsLoaded || subChecked);
 
   // File input button styling
   const fileInputBase =
@@ -507,8 +531,8 @@ export default function UtilityPage() {
             {loading ? 'Comparing...' : 'Start Comparison'}
           </button>
 
-          {/* Only show when we KNOW there's no active plan */}
-          {showNoPlanBlock && (
+          {/* If NO active subscription, show buy-plan hint + Plans button (only after checks ready) */}
+          {showNoPlanUI && (
             <>
               <span className="text-sm text-red-600">
                 You don&apos;t have plan — first buy the plan.
@@ -547,7 +571,10 @@ export default function UtilityPage() {
         onClick={closeModal}
         aria-hidden={!modal.open}
       >
+        {/* Backdrop */}
         <div className="absolute inset-0 bg-black/40" />
+
+        {/* Panel */}
         <div className="absolute inset-0 flex items-center justify-center p-4">
           <div
             role="dialog"
@@ -564,6 +591,7 @@ export default function UtilityPage() {
                 aria-label="Close"
                 className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300"
               >
+                {/* X icon */}
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                   <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
                 </svg>
@@ -582,6 +610,7 @@ export default function UtilityPage() {
                   {a.label}
                 </button>
               ))}
+              {/* Default close if no actions */}
               {(!modal.actions || modal.actions.length === 0) && (
                 <button
                   onClick={closeModal}
@@ -595,6 +624,7 @@ export default function UtilityPage() {
         </div>
       </div>
 
+      {/* Modal animation helper (no heavy CSS) */}
       <style jsx>{``}</style>
     </div>
   );
