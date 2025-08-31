@@ -63,9 +63,12 @@ export default async function handler(req, res) {
     // by NOT sending flow_data at all.
 
     // 4) Compute a safe return URL
-    const origin =
-      process.env.APP_URL ||
-      `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}`;
+    // Prefer env; otherwise use current host; final fallback => finalpixel.vercel.app
+    const envOrigin = ("https://finalpixel.vercel.app/"|| "").trim();
+    const headerOrigin = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}`;
+    const origin = envOrigin
+      ? envOrigin.replace(/\/$/, "")
+      : (req.headers?.host ? headerOrigin : "https://finalpixel.vercel.app");
     const return_url = `${origin}/accounts`;
 
     // 5) Create the Billing Portal session
@@ -78,7 +81,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ url: session.url });
   } catch (err) {
     console.error("[portal] error:", err);
-    // Bubble up Stripe’s helpful message (the one you saw)
+    // Bubble up Stripe’s helpful message
     return res.status(400).json({ error: err.message });
   }
 }

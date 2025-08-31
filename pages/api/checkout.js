@@ -9,7 +9,7 @@ const PRICE_MAP = {
 };
 
 // Use deployed site in prod, localhost in dev
-const BASE_URL =  'http://localhost:3000';
+const BASE_URL =  'https://finalpixel.vercel.app';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
