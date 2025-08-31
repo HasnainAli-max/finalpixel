@@ -35,19 +35,15 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No stripeCustomerId on user" });
     }
 
-    // 3) Build optional flow_data correctly
+    // 3) Optional flow selection
     const { action } = req.body || {};
     let flow_data = undefined;
 
-    // If you want to force-open a specific flow:
     if (action === "cancel" && subscriptionId) {
       flow_data = {
         type: "subscription_cancel",
         subscription_cancel: {
           subscription: subscriptionId,
-          // optional extras:
-          // cancellation_reason: { enabled: true },
-          // proration_behavior: "always_invoice",
         },
       };
     } else if ((action === "upgrade" || action === "downgrade") && subscriptionId) {
@@ -55,16 +51,12 @@ export default async function handler(req, res) {
         type: "subscription_update",
         subscription_update: {
           subscription: subscriptionId,
-          // optional: default_allowed_updates, items, etc.
         },
       };
     }
-    // If action is anything else (or missing), we open the generic portal
-    // by NOT sending flow_data at all.
 
-    // 4) Compute a safe return URL
-    // Prefer env; otherwise use current host; final fallback => finalpixel.vercel.app
-    const envOrigin = ("https://finalpixel.vercel.app/"|| "").trim();
+    // 4) Compute a safe return URL (env → request host → final fallback)
+    const envOrigin = (process.env.NEXT_PUBLIC_SITE_URL || process.env.APP_URL || "").trim();
     const headerOrigin = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}`;
     const origin = envOrigin
       ? envOrigin.replace(/\/$/, "")
@@ -81,7 +73,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ url: session.url });
   } catch (err) {
     console.error("[portal] error:", err);
-    // Bubble up Stripe’s helpful message
     return res.status(400).json({ error: err.message });
   }
 }

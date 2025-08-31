@@ -1,6 +1,6 @@
-
-import { stripe } from '@/lib/stripe/stripe';
-import { authAdmin } from '@/lib/firebase/firebaseAdmin';
+// pages/api/portal.js
+import { stripe } from "@/lib/stripe/stripe";
+import { authAdmin } from "@/lib/firebase/firebaseAdmin";
 
 async function findOrCreateCustomerByEmail(email, uid) {
   try {
@@ -14,26 +14,33 @@ async function findOrCreateCustomerByEmail(email, uid) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const auth = req.headers.authorization || '';
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-    if (!token) return res.status(401).json({ error: 'Missing ID token' });
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Missing ID token" });
 
     const decoded = await authAdmin.verifyIdToken(token);
     const email = decoded.email;
-    if (!email) return res.status(400).json({ error: 'User email is required' });
+    if (!email) return res.status(400).json({ error: "User email is required" });
 
     const customerId = await findOrCreateCustomerByEmail(email, decoded.uid);
+
+    // Use env base URL if present; fallback to finalpixel
+    const base = (process.env.NEXT_PUBLIC_SITE_URL || process.env.APP_URL || "https://finalpixel.vercel.app")
+      .toString()
+      .replace(/\/$/, "");
+
     const portal = await stripe.billingPortal.sessions.create({
       customer: customerId,
-      return_url: `${'https://finalpixel.vercel.app/'}/billing`,
+      // Redirect back to Accounts automatically after the user exits portal
+      return_url: `${base}/accounts`,
     });
 
     return res.status(200).json({ url: portal.url });
   } catch (e) {
-    console.error('portal error', e);
-    return res.status(500).json({ error: 'Internal error' });
+    console.error("portal error", e);
+    return res.status(500).json({ error: "Internal error" });
   }
 }
