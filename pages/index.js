@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import Head from 'next/head';
+import { useRouter } from 'next/router';
 import { auth } from '@/lib/firebase/config';
 import { onAuthStateChanged, signOut as fbSignOut } from 'firebase/auth';
 import { getFirestore, doc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore'; // keep for active-session guard
@@ -26,18 +27,38 @@ function getOrCreateSessionId() {
 }
 
 export default function LandingPage() {
+  const router = useRouter();
+
   // Auth-aware header state
   const [user, setUser] = useState(null);
   const [open, setOpen] = useState(false);
+
+  // anti-SSR-flash helper
+  const [hydrated, setHydrated] = useState(false);
 
   // subscription state (now driven by Stripe)
   const [hasActivePlan, setHasActivePlan] = useState(false);
   const [planKnown, setPlanKnown] = useState(false); // first-read guard to avoid brief enable
 
   useEffect(() => {
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => setUser(u || null));
     return () => unsub();
   }, []);
+
+  // On return from checkout success, immediately cache "has plan" to prevent any flicker
+  useEffect(() => {
+    if (!router.isReady || !user?.uid) return;
+    const q = router.query || {};
+    if (q.payment === 'success') {
+      try { localStorage.setItem(`pp_has_plan_${user.uid}`, '1'); } catch {}
+      setHasActivePlan(true);
+      setPlanKnown(true);
+    }
+  }, [router.isReady, router.query, user?.uid]);
 
   // 🔄 Read user's plan from STRIPE (not Firestore) + cache to prevent flash
   useEffect(() => {
@@ -77,7 +98,7 @@ export default function LandingPage() {
         let data;
         try { data = JSON.parse(text); } catch { data = {}; }
 
-        const active = !!data?.active; // server already applies statuses (active/trialing/past_due/unpaid)
+        const active = !!data?.active; // server applies active/trialing/past_due/unpaid
         if (!cancelled) {
           setHasActivePlan(active);
           setPlanKnown(true);
@@ -90,14 +111,13 @@ export default function LandingPage() {
             setHasActivePlan(false);
             setPlanKnown(true);
           }
-          // optional: console.warn('subscription-status fetch failed:', e);
         }
       }
     }
 
     checkStripe();
 
-    // optional: re-check when tab becomes visible (user may upgrade in portal)
+    // re-check when tab becomes visible (user may upgrade in portal)
     const onVis = () => {
       if (document.visibilityState === 'visible') checkStripe();
     };
@@ -194,6 +214,11 @@ export default function LandingPage() {
       e.stopPropagation();
     }
   };
+
+  // While not hydrated, hide pricing section to avoid SSR “enabled” flash for signed-in users
+  // Also, if user is signed in but plan isn’t known yet, keep it hidden until we know.
+  const hidePricing =
+    !hydrated || (user && !planKnown);
 
   return (
     <div className="min-h-screen bg-white text-gray-900">
@@ -406,7 +431,11 @@ export default function LandingPage() {
       </section>
 
       {/* Pricing Section */}
-      <section className="bg-white text-center py-16 px-6">
+      <section
+        className={`bg-white text-center py-16 px-6 transition-opacity duration-150 ${
+          hidePricing ? 'opacity-0 pointer-events-none select-none' : 'opacity-100'
+        }`}
+      >
         <h2 className="text-3xl font-bold mb-8 text-purple-800">Pricing Plans</h2>
         <div className="grid gap-6 md:grid-cols-3 max-w-6xl mx-auto">
           {/* Starter */}

@@ -25,6 +25,21 @@ function getOrCreateSessionId() {
   }
 }
 
+// --- helpers for local caching ---
+function todayStr() {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+function remainingKey(uid, plan) {
+  const planSafe = plan || 'none';
+  return `pp_remaining_${uid}_${planSafe}_${todayStr()}`;
+}
+function subCacheKey(uid) {
+  return `pp_sub_cache_${uid}`;
+}
+
 export default function UtilityPage() {
   const [image1, setImage1] = useState(null);
   const [image2, setImage2] = useState(null);
@@ -42,9 +57,13 @@ export default function UtilityPage() {
   const [dailyLimit, setDailyLimit] = useState(null);
   const [remaining, setRemaining] = useState(null);
 
-  // NEW: Stripe-driven authority for subscription
+  // Stripe-driven authority for subscription
   const [subActive, setSubActive] = useState(false);
   const [subStatus, setSubStatus] = useState(null);
+
+  // flags to avoid flicker of "no plan" block
+  const [fsLoaded, setFsLoaded] = useState(false);
+  const [subChecked, setSubChecked] = useState(false);
 
   const router = useRouter();
 
@@ -61,28 +80,44 @@ export default function UtilityPage() {
 
   const closeModal = () => setModal((m) => ({ ...m, open: false }));
 
-  // Auth guard (no immediate redirect inside the callback)
+  // Auth guard + seed from local cache immediately (no flicker)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
-        // Firestore fallback (kept as non-authoritative UI seed)
+
+        // 1) Seed quickly from local cache if available (prevents "no plan" flash)
+        try {
+          const raw = localStorage.getItem(subCacheKey(u.uid));
+          if (raw) {
+            const cache = JSON.parse(raw);
+            if (typeof cache?.active === 'boolean') {
+              setSubActive(!!cache.active);
+            }
+            if (cache?.plan && PLAN_LIMITS[cache.plan] != null) {
+              setPlanName(cache.plan);
+              setDailyLimit(PLAN_LIMITS[cache.plan]);
+            }
+          }
+        } catch {}
+
+        // 2) Firestore fallback seed
         try {
           const db = getFirestore();
           const snap = await getDoc(doc(db, 'users', u.uid));
           const d = snap.exists() ? snap.data() : {};
           const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
           const max = PLAN_LIMITS[rawPlan] ?? 0;
-          setPlanName(rawPlan || null);
-          setDailyLimit(max || null);
-          setRemaining(max || null);
+          setPlanName((p) => p || rawPlan || null); // don't overwrite cache if it already set
+          if (max) setDailyLimit((dl) => (typeof dl === 'number' ? dl : max));
         } catch {
-          setPlanName(null);
-          setDailyLimit(null);
-          setRemaining(null);
+          // ignore
+        } finally {
+          setFsLoaded(true);
         }
       } else {
         setUser(null);
+        setFsLoaded(true);
       }
       setAuthChecked(true);
     });
@@ -96,13 +131,9 @@ export default function UtilityPage() {
     if (!user) {
       let justSignedUp = false;
       try { justSignedUp = !!localStorage.getItem('justSignedUp'); } catch {}
-      if (justSignedUp) {
-        // skip redirect to /login once; wait for user to hydrate
-        return;
-      }
+      if (justSignedUp) return;
       router.replace('/login');
     } else {
-      // user is present → cleanup the flag if set
       try { localStorage.removeItem('justSignedUp'); } catch {}
     }
   }, [authChecked, user, router]);
@@ -186,6 +217,14 @@ export default function UtilityPage() {
   function showFriendlyError({ status, code, msg }) {
     const m = String(msg || '').toLowerCase();
 
+    // helper to persist remaining whenever we set it here
+    const persistRemaining = (val) => {
+      setRemaining(val);
+      try {
+        if (user?.uid) localStorage.setItem(remainingKey(user.uid, planName), String(val));
+      } catch {}
+    };
+
     if (status === 401 && /invalid|expired|token|unauthorized/.test(m)) {
       openModal({
         title: 'Session expired',
@@ -205,7 +244,7 @@ export default function UtilityPage() {
           { label: 'View Plans', onClick: () => { closeModal(); router.push('/'); } },
         ],
       });
-      setRemaining(0);
+      persistRemaining(0);
       return;
     }
 
@@ -214,11 +253,10 @@ export default function UtilityPage() {
         title: 'Daily limit reached',
         message: 'You have reached the daily comparison limit for your plan. Upgrade to run more comparisons today.',
         actions: [
-          // Goes to customer portal instead of plans page
           { label: 'Upgrade Plan', onClick: () => { goToCustomerPortal(); } },
         ],
       });
-      setRemaining(0);
+      persistRemaining(0);
       return;
     }
 
@@ -250,7 +288,7 @@ export default function UtilityPage() {
         title: 'Network issue',
         message: 'We could not reach the server. Please check your internet connection and try again.',
         actions: [
-          { label: 'Retry', onClick: () => { closeModal(); /* user can click Start Comparison again */ } },
+          { label: 'Retry', onClick: () => { closeModal(); } },
         ],
       });
       return;
@@ -260,12 +298,12 @@ export default function UtilityPage() {
       title: 'Comparison failed',
       message: 'We couldn’t complete the comparison. Please try again in a minute.',
       actions: [
-        { label: 'Retry', onClick: () => { closeModal(); /* user can click Start Comparison again */ } },
+        { label: 'Retry', onClick: () => { closeModal(); } },
       ],
     });
   }
 
-  // ----- NEW: Ask server (Stripe) for current subscription status -----
+  // ----- Ask server (Stripe) for current subscription status -----
   useEffect(() => {
     const run = async () => {
       if (!authChecked || !user) return;
@@ -278,28 +316,50 @@ export default function UtilityPage() {
         const data = await res.json().catch(() => ({}));
 
         if (res.ok) {
-          // Stripe is the source of truth
           setSubActive(!!data.active);
           setSubStatus(data.status || null);
 
-          // If Stripe returned a known plan, adopt its limits; otherwise keep fallback
+          // cache result to avoid refresh flicker later
+          try {
+            localStorage.setItem(
+              subCacheKey(user.uid),
+              JSON.stringify({ active: !!data.active, plan: data.plan || null, status: data.status || null, t: Date.now() })
+            );
+          } catch {}
+
           if (data.plan && PLAN_LIMITS[data.plan] != null) {
             setPlanName(data.plan);
             setDailyLimit(PLAN_LIMITS[data.plan]);
-            setRemaining(PLAN_LIMITS[data.plan]);
           }
-
-          // If inactive, keep UI in "no plan" state; if active, restrictions off automatically
         } else {
-          // Keep fallback but log
           console.warn('subscription-status error:', data?.error || res.status);
         }
       } catch (e) {
         console.warn('subscription-status fetch failed:', e);
+      } finally {
+        setSubChecked(true);
       }
     };
     run();
   }, [authChecked, user]);
+
+  // ----- Initialize/persist remaining whenever plan/limit ready -----
+  useEffect(() => {
+    if (!user?.uid) return;
+    if (typeof dailyLimit !== 'number') return;
+
+    // load from localStorage (per day, per plan). If none, seed with full dailyLimit.
+    try {
+      const key = remainingKey(user.uid, planName);
+      const raw = localStorage.getItem(key);
+      const stored = raw != null ? parseInt(raw, 10) : NaN;
+      const next = Number.isFinite(stored) ? Math.max(0, Math.min(dailyLimit, stored)) : dailyLimit;
+      setRemaining(next);
+      localStorage.setItem(key, String(next)); // ensure it exists for future refreshes
+    } catch {
+      setRemaining(dailyLimit);
+    }
+  }, [user?.uid, planName, dailyLimit]);
 
   const handleCompare = async () => {
     if (!image1 || !image2) {
@@ -351,9 +411,18 @@ export default function UtilityPage() {
       if (!data.result) throw new Error('Comparison result missing in response.');
 
       setComparisonResult(data.result);
-      setRemaining((prev) => (typeof prev === 'number' ? Math.max(prev - 1, 0) : prev));
+
+      // decrement + persist remaining locally
+      setRemaining((prev) => {
+        const next = typeof prev === 'number'
+          ? Math.max(prev - 1, 0)
+          : (typeof dailyLimit === 'number' ? Math.max(dailyLimit - 1, 0) : 0);
+        try {
+          if (user?.uid) localStorage.setItem(remainingKey(user.uid, planName), String(next));
+        } catch {}
+        return next;
+      });
     } catch (error) {
-      // most cases already handled in showFriendlyError
       console.error('Comparison failed:', error);
     } finally {
       setLoading(false);
@@ -361,8 +430,9 @@ export default function UtilityPage() {
   };
 
   // ---- SUBSCRIPTION-BASED UI STATE ----
-  // Stripe-active overrides any Firestore fallback:
   const hasActivePlan = subActive || (typeof dailyLimit === 'number' && dailyLimit > 0);
+  // Only show the "no plan" UI once at least one backend check has finished
+  const showNoPlanUI = (!hasActivePlan) && (fsLoaded || subChecked);
 
   // File input button styling
   const fileInputBase =
@@ -461,8 +531,8 @@ export default function UtilityPage() {
             {loading ? 'Comparing...' : 'Start Comparison'}
           </button>
 
-          {/* If NO active subscription, show buy-plan hint + Plans button */}
-          {!hasActivePlan && (
+          {/* If NO active subscription, show buy-plan hint + Plans button (only after checks ready) */}
+          {showNoPlanUI && (
             <>
               <span className="text-sm text-red-600">
                 You don&apos;t have plan — first buy the plan.

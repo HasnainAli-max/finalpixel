@@ -73,7 +73,7 @@ export default function SuccessPage() {
             {/* Actions */}
             <div className="mt-6 flex flex-col sm:flex-row gap-3 justify-center">
               <Link href="/utility" className="inline-flex justify-center items-center rounded-xl bg-purple-700 text-white px-5 h-11 font-medium hover:brightness-110">
-                Go to Dashboard
+                Go to Home
               </Link>
               <Link href="/accounts" className="inline-flex justify-center items-center rounded-xl border border-slate-300 dark:border-slate-700 px-5 h-11 font-medium hover:bg-slate-50 dark:hover:bg-slate-800">
                 View Account
@@ -81,11 +81,11 @@ export default function SuccessPage() {
             </div>
 
             {/* Back home */}
-            <div className="mt-4">
+            {/* <div className="mt-4">
               <Link href="/" className="text-sm text-purple-700 dark:text-purple-300 hover:underline">
                 Return to homepage
               </Link>
-            </div>
+            </div> */}
           </div>
         </div>
       </main>

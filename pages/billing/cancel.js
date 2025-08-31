@@ -47,7 +47,7 @@ export default function Cancel() {
               <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <Link href="/">
                   <button className="w-full h-11 rounded-xl bg-purple-700 text-white font-medium shadow-sm hover:brightness-95 transition">
-                    Return to Home
+                    Return to plans
                   </button>
                 </Link>
 
