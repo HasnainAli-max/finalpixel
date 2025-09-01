@@ -31,7 +31,24 @@ export default function Accounts() {
     interval: "month",
     customerId: null,
     subscriptionId: null,
+
+    // cancellation state
+    cancelAtPeriodEnd: false,
+    cancelAt: null,           // unix seconds
+    canceledAt: null,         // unix seconds
+    endedAt: null,            // unix seconds
+    pauseBehavior: null,
   });
+
+  // ---------- Theme persistence (no toggle button) ----------
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = localStorage.getItem("theme");
+    const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+    const dark = saved ? saved === "dark" : prefersDark;
+    if (dark) document.documentElement.classList.add("dark");
+    else document.documentElement.classList.remove("dark");
+  }, []);
 
   // ---------- Custom Modal State ----------
   const [modal, setModal] = useState({
@@ -74,7 +91,7 @@ export default function Accounts() {
     return () => unsub();
   }, [authUser?.uid]);
 
-  // 3) fetch subscription from Stripe (server route) — factored so we can call it anywhere
+  // 3) fetch subscription from Stripe (server route)
   const fetchingRef = useRef(false);
   const fetchStripeStatus = async () => {
     if (!authUser || fetchingRef.current) return;
@@ -109,6 +126,13 @@ export default function Accounts() {
           interval: data.interval || "month",
           customerId: data.customerId || null,
           subscriptionId: data.subscriptionId || null,
+
+          // cancel state
+          cancelAtPeriodEnd: !!data.cancelAtPeriodEnd,
+          cancelAt: data.cancelAt || null,
+          canceledAt: data.canceledAt || null,
+          endedAt: data.endedAt || null,
+          pauseBehavior: data.pauseBehavior || null,
         });
       }
     } catch (e) {
@@ -128,17 +152,13 @@ export default function Accounts() {
 
   // instant refresh: listen for global billing sync + refetch on tab focus
   useEffect(() => {
-    // BroadcastChannel (checkout success page or other tabs will ping this)
     let bc;
     try {
       bc = new BroadcastChannel("pp-billing-sync");
       bc.addEventListener("message", (ev) => {
-        if (ev?.data === "refresh") {
-          fetchStripeStatus();
-        }
+        if (ev?.data === "refresh") fetchStripeStatus();
       });
     } catch {}
-    // visibility change (returning from Stripe or switching tabs)
     const onVis = () => {
       if (document.visibilityState === "visible") fetchStripeStatus();
     };
@@ -151,7 +171,7 @@ export default function Accounts() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // sign out (no toasts; same behavior)
+  // sign out
   const handleSignOut = async () => {
     try {
       await signOut(auth);
@@ -165,7 +185,7 @@ export default function Accounts() {
     }
   };
 
-  // 5) open Stripe Customer Portal (intent optional: 'update' | 'cancel')
+  // Open Stripe Customer Portal (intent optional: 'update' | 'cancel')
   async function openPortal(intent) {
     try {
       setBusy(true);
@@ -184,7 +204,6 @@ export default function Accounts() {
       try { data = JSON.parse(text); } catch { throw new Error(text); }
       if (!res.ok) throw new Error(data.error || "Failed to open billing portal");
 
-      // small delay for UX then redirect
       setTimeout(() => { window.location.href = data.url; }, 200);
     } catch (e) {
       console.error("openPortal error:", e);
@@ -198,15 +217,13 @@ export default function Accounts() {
     }
   }
 
-  // Guarded handlers for Update/Cancel buttons
+  // Guarded handlers for Update/Cancel/Resume buttons
   const handleUpdateClick = () => {
     if (!stripeSub.active) {
       openModal({
         title: "No active subscription",
         message: "You don't have an active plan. First buy the plan, then you can update it.",
-        actions: [
-          { label: "Buy a Plan", onClick: () => { closeModal(); router.push("/"); } },
-        ],
+        actions: [{ label: "Buy a Plan", onClick: () => { closeModal(); router.push("/"); } }],
       });
       return;
     }
@@ -218,13 +235,10 @@ export default function Accounts() {
       openModal({
         title: "No active subscription",
         message: "You don't have an active plan. First buy the plan, then you can cancel it.",
-        actions: [
-          { label: "Buy a Plan", onClick: () => { closeModal(); router.push("/"); } },
-        ],
+        actions: [{ label: "Buy a Plan", onClick: () => { closeModal(); router.push("/"); } }],
       });
       return;
     }
-    // Confirm cancel modal
     openModal({
       title: "Cancel subscription?",
       message: "You’ll be taken to Stripe to cancel your subscription. You can resume later if you change your mind.",
@@ -233,6 +247,12 @@ export default function Accounts() {
         { label: "Keep Plan", onClick: () => closeModal() },
       ],
     });
+  };
+
+  // NEW: Resume click (for “Won’t cancel subscription”)
+  const handleResumeClick = () => {
+    // Send to update flow; portal shows a "Resume" action if cancel is scheduled
+    openPortal("update");
   };
 
   // 4) derived values for UI (Stripe-first)
@@ -244,7 +264,6 @@ export default function Accounts() {
       "—";
 
     const loginEmail = authUser?.email || userDoc?.email || "—";
-    const billingEmail = userDoc?.stripeCustomer?.email || userDoc?.email || loginEmail;
 
     const planKey = stripeSub.plan;
     const plan = planKey ? planKey.charAt(0).toUpperCase() + planKey.slice(1) : "No plan";
@@ -256,20 +275,31 @@ export default function Accounts() {
       amount = `$${dollars}`;
     }
 
-    const renewDate = formatDate(stripeSub.currentPeriodEnd);
-    const intervalSuffix = stripeSub.interval === "year" ? " / yr" : (stripeSub.interval ? " / mo" : "");
+    const renewOrEndDate = formatDate(stripeSub.currentPeriodEnd);
 
-    return { name, loginEmail, billingEmail, plan, amount, status, renewDate, intervalSuffix };
+    // Cancel info label
+    let cancelLabel = "";
+    if (status === "canceled") {
+      const canceledOn = formatDate(stripeSub.canceledAt || stripeSub.endedAt);
+      cancelLabel = canceledOn ? `Canceled on ${canceledOn}` : "Canceled";
+    } else if (stripeSub.cancelAtPeriodEnd) {
+      const endOn = formatDate(stripeSub.cancelAt || stripeSub.currentPeriodEnd);
+      cancelLabel = endOn ? `Will cancel on ${endOn}` : "Will cancel at period end";
+    }
+
+    // Renewal vs End text
+    let cycleText = "";
+    if (status === "canceled" || stripeSub.cancelAtPeriodEnd) {
+      cycleText = renewOrEndDate ? `Ends on ${renewOrEndDate}` : "No renewal scheduled";
+    } else {
+      const intervalSuffix = stripeSub.interval === "year" ? " / yr" : (stripeSub.interval ? " / mo" : "");
+      cycleText = renewOrEndDate ? `Renews on ${renewOrEndDate}${intervalSuffix ? "" : ""}` : "No renewal scheduled";
+    }
+
+    const photoURL = userDoc?.photoURL || authUser?.photoURL || null;
+
+    return { name, loginEmail, plan, amount, status, cycleText, cancelLabel, photoURL };
   }, [userDoc, authUser, stripeSub]);
-
-  if (loading) {
-    return (
-      <main className="min-h-screen grid place-items-center text-slate-600 dark:text-slate-300">
-        Loading account…
-      </main>
-    );
-  }
-  if (!authUser) return null;
 
   return (
     <>
@@ -277,21 +307,42 @@ export default function Accounts() {
         <title>Account – PixelProof</title>
       </Head>
 
-      {/* Same Navbar as Utility page */}
       <Navbar user={authUser} onSignOut={handleSignOut} />
 
-      <main className="min-h-screen bg-gradient-to-b from-[#f7f8ff] to-white dark:from-slate-950 dark:to-slate-900">
-        {/* spacer row kept */}
-        <div className="max-w-6xl mx-auto px-6 pt-8 pb-4 flex items-center justify-end gap-3" />
+      <main className="min-h-screen bg-gradient-to-b from-[#f7f8ff] to-white dark:from-slate-950 dark:to-slate-900 relative">
+        {/* ---------- Utility-style LOADER OVERLAY ---------- */}
+        {loading && (
+          <div
+            className="fixed inset-0 z-[200] flex flex-col items-center justify-center backdrop-blur-sm bg-black/40"
+            aria-busy="true"
+            aria-live="polite"
+          >
+            <div className="relative h-10 w-10">
+              <span className="absolute inset-0 rounded-full border-4 border-violet-500/25" />
+              <span className="absolute inset-0 rounded-full border-4 border-violet-500 border-t-transparent animate-spin" />
+            </div>
+            <div className="mt-3 text-sm text-slate-200">Checking subscription...</div>
+          </div>
+        )}
+        {/* --------------------------------------------------- */}
 
-        <div className="max-w-6xl mx-auto px-6 pb-14 grid lg:grid-cols-3 gap-6">
+        <div className="max-w-6xl mx-auto px-6 pb-14 grid lg:grid-cols-3 gap-6 pt-6">
           {/* Profile */}
           <section className="lg:col-span-2 bg-white dark:bg-slate-800 rounded-2xl shadow-sm ring-1 ring-black/5 dark:ring-white/10 p-6">
             <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100 mb-6">Profile</h2>
 
             <div className="flex items-center gap-4 mb-6">
-              <div className="h-14 w-14 flex items-center justify-center rounded-full bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-200 font-bold">
-                {initials(view.name)}
+              <div className="h-14 w-14 rounded-full overflow-hidden bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-200 font-bold flex items-center justify-center">
+                {view.photoURL ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={view.photoURL}
+                    alt={view.name || "User avatar"}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  initials(view.name)
+                )}
               </div>
               <div>
                 <div className="text-slate-900 dark:text-slate-100 font-semibold">{view.name}</div>
@@ -299,13 +350,8 @@ export default function Accounts() {
               </div>
             </div>
 
-            <div className="grid md:grid-cols-2 gap-4">
-              <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 bg-slate-50 dark:bg-slate-700/60">
-                <div className="text-slate-600 dark:text-slate-300 text-sm mb-1">Billing email</div>
-                <div className="font-semibold text-slate-900 dark:text-slate-100">{view.billingEmail}</div>
-                <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">(different email is okay)</div>
-              </div>
-
+            {/* Only login email card (billing email removed) */}
+            <div className="grid gap-4">
               <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 bg-slate-50 dark:bg-slate-700/60">
                 <div className="text-slate-600 dark:text-slate-300 text-sm mb-1">Login email</div>
                 <div className="font-semibold text-slate-900 dark:text-slate-100">{view.loginEmail}</div>
@@ -340,13 +386,19 @@ export default function Accounts() {
                   {view.amount}
                 </span>
                 <span className="text-slate-600 dark:text-slate-300">
-                  {view.amount !== "—" ? view.intervalSuffix : ""}
+                  {view.amount !== "—" ? (stripeSub.interval === "year" ? " / yr" : " / mo") : ""}
                 </span>
               </div>
 
               <div className="text-slate-600 dark:text-slate-300 text-sm mt-2">
-                {view.renewDate ? `Renews on ${view.renewDate}` : "No renewal scheduled"}
+                {view.cycleText}
               </div>
+
+              {!!view.cancelLabel && (
+                <div className="text-amber-700 dark:text-amber-300 text-sm mt-1">
+                  {view.cancelLabel}
+                </div>
+              )}
             </div>
 
             <div className="space-y-3">
@@ -360,14 +412,26 @@ export default function Accounts() {
                 Update plan
               </button>
 
-              <button
-                type="button"
-                disabled={busy}
-                onClick={handleCancelClick}
-                className="w-full h-11 rounded-xl border border-amber-300 dark:border-amber-600 text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 font-medium hover:bg-amber-100 dark:hover:bg-amber-900/50 disabled:opacity-50 transition"
-              >
-                Cancel subscription
-              </button>
+              {/* Conditional: cancel vs resume */}
+              {stripeSub.cancelAtPeriodEnd ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={handleResumeClick}
+                  className="w-full h-11 rounded-xl border border-emerald-300 dark:border-emerald-600 text-emerald-800 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30 font-medium hover:bg-emerald-100 dark:hover:bg-emerald-900/50 disabled:opacity-50 transition"
+                >
+                  Won’t cancel subscription
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={handleCancelClick}
+                  className="w-full h-11 rounded-xl border border-amber-300 dark:border-amber-600 text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 font-medium hover:bg-amber-100 dark:hover:bg-amber-900/50 disabled:opacity-50 transition"
+                >
+                  Cancel subscription
+                </button>
+              )}
             </div>
           </aside>
         </div>

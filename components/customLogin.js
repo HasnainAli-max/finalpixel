@@ -46,14 +46,23 @@ const SignIn = () => {
     <>
       <Toaster richColors position="top-right" closeButton />
 
-      <div className="flex w-full flex-col items-center justify-center bg-white dark:bg-gray-900 pt-5 rounded-2xl max-w-sm text-center gap-4 shadow-sm   dark:border-gray-800">
+      <div
+        className="
+          flex w-full flex-col items-center justify-center
+          bg-white text-gray-900
+          pt-5 px-5
+          rounded-2xl max-w-sm text-center gap-4
+          shadow-sm 
+        "
+      >
         <input
           placeholder="Email"
-          className="w-full border border-gray-300 dark:border-gray-700 rounded-md px-4 py-2
-                     bg-gray-50 dark:bg-gray-800
-                     text-gray-900 dark:text-gray-100
-                     placeholder-gray-400 dark:placeholder-gray-500
-                     focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
+          className="
+            w-full border border-gray-300 rounded-md px-4 py-2
+            bg-gray-50 text-gray-900
+            placeholder-gray-400
+            focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent
+          "
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           disabled={loading}
@@ -63,11 +72,12 @@ const SignIn = () => {
         <input
           type="password"
           placeholder="Password"
-          className="w-full border border-gray-300 dark:border-gray-700 rounded-md px-4 py-2
-                     bg-gray-50 dark:bg-gray-800
-                     text-gray-900 dark:text-gray-100
-                     placeholder-gray-400 dark:placeholder-gray-500
-                     focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
+          className="
+            w-full border border-gray-300 rounded-md px-4 py-2
+            bg-gray-50 text-gray-900
+            placeholder-gray-400
+            focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent
+          "
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           disabled={loading}
@@ -75,9 +85,12 @@ const SignIn = () => {
         />
 
         <button
-          className={`bg-blue-600 text-white w-full py-2 rounded transition ${
-            loading ? "opacity-60 cursor-not-allowed" : "hover:bg-blue-700"
-          }`}
+          className={`
+            w-full py-2 rounded-md transition
+            bg-blue-600 text-white
+            focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2
+            ${loading ? "opacity-60 cursor-not-allowed" : "hover:bg-blue-700"}
+          `}
           onClick={handleSignIn}
           disabled={loading}
         >
@@ -92,7 +105,7 @@ const SignIn = () => {
         </Link>
 
         <div className="w-full pb-4">
-          <p className="flex text-sm items-center justify-center text-gray-700 dark:text-gray-300">
+          <p className="flex text-sm items-center justify-center text-gray-700">
             Don&apos;t have an account?
             <Link
               className="text-blue-600 hover:text-blue-700 hover:underline cursor-pointer ml-1"

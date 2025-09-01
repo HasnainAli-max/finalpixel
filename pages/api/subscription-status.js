@@ -80,10 +80,11 @@ export default async function handler(req, res) {
       return res.status(200).json({ active: false, status: "no_customer" });
     }
 
-    // ----- Subscriptions (expand price only) -----
+    // ----- Subscriptions (expand price; keep your existing behavior) -----
     const subs = await stripe.subscriptions.list({
       customer: customer.id,
       status: "all",
+      // price is enough; we’ll fetch product only if needed below
       expand: ["data.items.data.price"],
       limit: 10,
     });
@@ -91,13 +92,13 @@ export default async function handler(req, res) {
     if (!subs?.data?.length) {
       return res
         .status(200)
-        .json({ active: false, status: "no_subscription" });
+        .json({ active: false, status: "no_subscription", customerId: customer.id });
     }
 
-    // Most recent sub
+    // Most recent subscription
     const latest = subs.data.sort((a, b) => b.created - a.created)[0];
 
-    // States that still allow access
+    // States that still allow access (same logic you had)
     const ACTIVE_STATES = new Set(["trialing", "active", "past_due", "unpaid"]);
     const isActive = ACTIVE_STATES.has(latest.status);
 
@@ -140,6 +141,13 @@ export default async function handler(req, res) {
     // Internal plan key
     const planKey = priceId ? reverseMap[priceId] || null : null;
 
+    // ---- NEW: expose cancellation fields so Accounts page can show them ----
+    const cancelAtPeriodEnd = !!latest.cancel_at_period_end;
+    const cancelAt = latest.cancel_at || null;       // unix seconds (scheduled)
+    const canceledAt = latest.canceled_at || null;   // unix seconds (executed)
+    const endedAt = latest.ended_at || null;         // unix seconds (access end)
+    const pauseBehavior = latest.pause_collection?.behavior || null;
+
     return res.status(200).json({
       // access control
       active: !!isActive,
@@ -158,6 +166,13 @@ export default async function handler(req, res) {
       currentPeriodEnd: latest.current_period_end, // unix seconds
       subscriptionId: latest.id,
       customerId: customer.id,
+
+      // cancellation exposure
+      cancelAtPeriodEnd,
+      cancelAt,
+      canceledAt,
+      endedAt,
+      pauseBehavior,
     });
   } catch (err) {
     console.error("subscription-status error:", err);
@@ -167,7 +182,5 @@ export default async function handler(req, res) {
     });
   }
 }
-
-
 
 // export { default } from "@/pages/api/subscription-status";

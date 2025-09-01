@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start -p 3000",
     "emulator": "firebase emulators:start --only firestore,auth --project pixelproof-18a84",
-    "dev:emu": "cross-env FIREBASE_PROJECT_ID=pixelproof-18a84 FIRESTORE_EMULATOR_HOST=localhost:8080 FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 GOOGLE_CLOUD_DISABLE_GRPC=1 concurrently -k -p \"[{name}]\" -n emu,stripe,web -c magenta,yellow,cyan \"firebase emulators:start --only firestore,auth --project pixelproof-18a84\" \"node scripts/dev-webhooks.mjs\" \"next dev -p 3000\""
+    "dev:emu": "cross-env NEXT_PUBLIC_USE_EMULATORS=1 FIREBASE_PROJECT_ID=pixelproof-18a84 FIRESTORE_EMULATOR_HOST=localhost:8080 FIREBASE_AUTH_EMULATOR_HOST=localhost:9099 GOOGLE_CLOUD_DISABLE_GRPC=1 concurrently -k -p \"[{name}]\" -n emu,stripe,web -c magenta,yellow,cyan \"firebase emulators:start --only firestore,auth --project pixelproof-18a84\" \"node scripts/dev-webhooks.mjs\" \"next dev -p 3000\""
   },
   "dependencies": {
     "@headlessui/react": "^1.7.7",

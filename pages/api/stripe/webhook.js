@@ -16,9 +16,12 @@ const PLAN_BY_PRICE = {
 
 /** -------- Helpers -------- */
 
+function tsOrNull(sec) {
+  return typeof sec === 'number' && sec > 0 ? Timestamp.fromMillis(sec * 1000) : null;
+}
+
 async function logStripeEvent({ event, rawLength, hint = {}, uid = null }) {
   if (IS_EMU) {
-    // Emulator: avoid Firestore writes to prevent gRPC/proto issues
     console.log('[webhook][emu-log]', event?.type, { id: event?.id, uid, hint, rawLength });
     return;
   }
@@ -50,6 +53,7 @@ async function writeFromSubscriptionEvent(subscription) {
     console.log('[webhook][emu-sub]', subscription?.id, subscription?.status);
     return;
   }
+
   const customerId = subscription.customer;
   const item = subscription.items?.data?.[0];
   const priceId = item?.price?.id || null;
@@ -77,20 +81,27 @@ async function writeFromSubscriptionEvent(subscription) {
     subscriptionId: subscription.id,
     priceId,
     activePlan: plan,
-    subscriptionStatus: subscription.status,
-    currentPeriodStart: subscription.current_period_start
-      ? Timestamp.fromMillis(subscription.current_period_start * 1000)
-      : null,
-    currentPeriodEnd: subscription.current_period_end
-      ? Timestamp.fromMillis(subscription.current_period_end * 1000)
-      : null,
-    cancelAtPeriodEnd: !!subscription.cancel_at_period_end,
+    subscriptionStatus: subscription.status,        // "active" | "trialing" | "canceled" | "past_due" | ...
+    currentPeriodStart: tsOrNull(subscription.current_period_start),
+    currentPeriodEnd: tsOrNull(subscription.current_period_end),
+
+    // ---- Cancellation fields (scheduled & executed) ----
+    cancelAtPeriodEnd: !!subscription.cancel_at_period_end, // user scheduled end-of-period cancel
+    cancelAt: tsOrNull(subscription.cancel_at),             // scheduled cancel timestamp (seconds -> TS)
+    canceledAt: tsOrNull(subscription.canceled_at),         // when Stripe executed cancel
+    endedAt: tsOrNull(subscription.ended_at),               // when access ended (usually == canceledAt or period end)
+    pauseBehavior: subscription.pause_collection?.behavior || null, // "void", "keep_as_draft", "mark_uncollectible"
+
+    // Price visuals
     currency: item?.price?.currency || null,
     amount: item?.price?.unit_amount ?? null,
     productId: item?.price?.product || null,
+
     updatedAt: FieldValue.serverTimestamp(),
   };
 
+  // If subscription is fully canceled, keep fields but we can also mark plan as last known.
+  // (Front-end is Stripe-first anyway.)
   await db.collection('users').doc(uid).set(payload, { merge: true });
 }
 
@@ -179,9 +190,9 @@ export default async function handler(req, res) {
     const { type } = event;
 
     console.log('🔔', type);
-
     await logStripeEvent({ event, rawLength });
 
+    // Create/Update/Delete all funnel through the same writer (handles cancellation too)
     if (
       type === 'customer.subscription.created' ||
       type === 'customer.subscription.updated' ||
@@ -207,9 +218,12 @@ export default async function handler(req, res) {
       });
     }
 
+    // You can add other lifecycle events if you like (paused/resumed etc.) – "updated" covers most states.
+
     return res.status(200).json({ received: true });
   } catch (err) {
     console.error('[webhook] top-level error:', err?.stack || err?.message || err);
-    return res.status(200).json({ received: true, warning: String(err?.message || err) }); // 200 in dev to avoid Stripe retries
+    // 200 in dev to avoid retries; in production you might choose 400
+    return res.status(200).json({ received: true, warning: String(err?.message || err) });
   }
 }

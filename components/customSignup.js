@@ -1,3 +1,4 @@
+// components/CustomSignUp.js
 "use client";
 
 import { useState } from "react";
@@ -175,7 +176,15 @@ const CustomSignUp = () => {
     <>
       <Toaster richColors position="top-right" closeButton />
 
-      <div className="flex w-full flex-col items-center justify-center bg-white pt-5 rounded-2xl max-w-sm w-full text-center gap-4">
+      <div
+        className="
+          flex w-full flex-col items-center justify-center
+          bg-white text-gray-900
+          pt-5 px-5
+          rounded-2xl max-w-sm w-full text-center gap-4
+          shadow-sm 
+        "
+      >
         <div className="w-full text-left">
           <label htmlFor="avatar-input" className="block text-sm font-medium text-gray-700 mb-1">
             Profile Image (optional)
@@ -185,7 +194,14 @@ const CustomSignUp = () => {
             type="file"
             accept="image/png,image/jpeg,image/webp"
             onChange={handleFileChange}
-            className="block w-full text-sm text-gray-900 file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0 file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200"
+            className="
+              block w-full text-sm
+              text-gray-900
+              file:mr-3 file:py-2 file:px-3 file:rounded-md file:border-0
+              file:bg-gray-100 file:text-gray-700
+              hover:file:bg-gray-200
+              bg-transparent
+            "
           />
           {selectedImageName && (
             <p className="mt-1 text-xs text-gray-500">Selected: {selectedImageName}</p>
@@ -194,32 +210,57 @@ const CustomSignUp = () => {
 
         <input
           placeholder="First Name"
-          className="w-full border border-gray-300 rounded-md px-4 py-2 bg-gray-50 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
+          className="
+            w-full border border-gray-300 rounded-md px-4 py-2
+            bg-gray-50 text-gray-900
+            placeholder-gray-400
+            focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent
+          "
           value={firstName}
           onChange={(e)=>setFirstName(e.target.value)}
         />
         <input
           placeholder="Last Name"
-          className="w-full border border-gray-300 rounded-md px-4 py-2 bg-gray-50 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
+          className="
+            w-full border border-gray-300 rounded-md px-4 py-2
+            bg-gray-50 text-gray-900
+            placeholder-gray-400
+            focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent
+          "
           value={lastName}
           onChange={(e)=>setLastName(e.target.value)}
         />
         <input
           placeholder="Email"
-          className="w-full border border-gray-300 rounded-md px-4 py-2 bg-gray-50 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
+          className="
+            w-full border border-gray-300 rounded-md px-4 py-2
+            bg-gray-50 text-gray-900
+            placeholder-gray-400
+            focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent
+          "
           value={email}
           onChange={(e)=>setEmail(e.target.value)}
         />
         <input
           type="password"
           placeholder="Password"
-          className="w-full border border-gray-300 rounded-md px-4 py-2 bg-gray-50 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent"
+          className="
+            w-full border border-gray-300 rounded-md px-4 py-2
+            bg-gray-50 text-gray-900
+            placeholder-gray-400
+            focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent
+          "
           value={password}
           onChange={(e)=>setPassword(e.target.value)}
         />
 
         <button
-          className={`bg-blue-600 text-white w-full py-2 rounded transition ${loading ? "opacity-60 cursor-not-allowed" : "hover:bg-blue-700"}`}
+          className={`
+            w-full py-2 rounded-md transition
+            bg-blue-600 text-white
+            focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-2
+            ${loading ? "opacity-60 cursor-not-allowed" : "hover:bg-blue-700"}
+          `}
           onClick={handleSignUp}
           disabled={loading}
         >
@@ -227,9 +268,12 @@ const CustomSignUp = () => {
         </button>
 
         <div className="w-full">
-          <p className="flex text-sm items-center justify-center">
+          <p className="flex text-sm items-center justify-center text-gray-700">
             Already have an account?
-            <Link className="text-blue-600 hover:text-blue-700 hover:underline cursor-pointer ml-1" href="/login">
+            <Link
+              className="text-blue-600 hover:text-blue-700 hover:underline cursor-pointer ml-1"
+              href="/login"
+            >
               Sign In
             </Link>
           </p>
