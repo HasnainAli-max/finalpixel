@@ -1,5 +1,5 @@
 // pages/utility.js
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/router';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { getFirestore, doc, getDoc, onSnapshot, setDoc, serverTimestamp } from 'firebase/firestore';
@@ -10,13 +10,18 @@ import LoadingSpinner from '../components/LoadingSpinner';
 import ReactMarkdown from 'react-markdown';
 
 const PLAN_LIMITS = { basic: 1, pro: 2, elite: 3 };
+const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024;
+const SUB_CACHE_TTL_MS = 60 * 1000;
 
-// stable per-browser session id
 function getOrCreateSessionId() {
   try {
     let id = localStorage.getItem('pp_session_id');
     if (!id) {
-      id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+      id =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : Math.random().toString(36).slice(2);
       localStorage.setItem('pp_session_id', id);
     }
     return id;
@@ -24,8 +29,6 @@ function getOrCreateSessionId() {
     return 'fallback-session';
   }
 }
-
-// --- helpers for local caching ---
 function todayStr() {
   const d = new Date();
   const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -33,11 +36,48 @@ function todayStr() {
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
 function remainingKey(uid, plan) {
-  const planSafe = plan || 'none';
-  return `pp_remaining_${uid}_${planSafe}_${todayStr()}`;
+  return `pp_remaining_${uid}_${plan || 'none'}_${todayStr()}`;
 }
 function subCacheKey(uid) {
   return `pp_sub_cache_${uid}`;
+}
+function validateFile(file) {
+  if (!file) return { ok: false, msg: 'No file' };
+  if (!ALLOWED_TYPES.has(file.type)) return { ok: false, msg: 'Unsupported type' };
+  if (file.size > MAX_FILE_SIZE_BYTES) return { ok: false, msg: 'File too large (max 15MB)' };
+  return { ok: true };
+}
+function useObjectUrl(file) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    if (!file) return setUrl(null);
+    const u = URL.createObjectURL(file);
+    setUrl(u);
+    return () => {
+      try {
+        URL.revokeObjectURL(u);
+      } catch {}
+    };
+  }, [file]);
+  return url;
+}
+
+// Helpers for limit modal
+function nextMidnightLocal() {
+  const d = new Date();
+  d.setHours(24, 0, 0, 0);
+  return d;
+}
+function formatTime(dt) {
+  const h = dt.getHours(),
+    m = String(dt.getMinutes()).padStart(2, '0');
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const hh = ((h + 11) % 12) + 1;
+  const date = `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(
+    2,
+    '0'
+  )}/${dt.getFullYear()}`;
+  return `${date} • ${hh}:${m} ${ampm}`;
 }
 
 export default function UtilityPage() {
@@ -48,71 +88,75 @@ export default function UtilityPage() {
   const [darkMode, setDarkMode] = useState(false);
   const [fileMeta, setFileMeta] = useState({});
   const [user, setUser] = useState(null);
-
-  // NEW: track when auth listener has fired at least once
   const [authChecked, setAuthChecked] = useState(false);
 
-  // plan/limits UI (Stripe is source of truth; Firestore is fallback)
   const [planName, setPlanName] = useState(null);
   const [dailyLimit, setDailyLimit] = useState(null);
   const [remaining, setRemaining] = useState(null);
 
-  // Stripe-driven authority for subscription
   const [subActive, setSubActive] = useState(false);
   const [subStatus, setSubStatus] = useState(null);
 
-  // flags to avoid flicker of "no plan" block
   const [fsLoaded, setFsLoaded] = useState(false);
   const [subChecked, setSubChecked] = useState(false);
 
+  const compareInFlight = useRef(false);
+  const subReqAbort = useRef(null);
+
   const router = useRouter();
 
-  // ---------- Custom Modal State ----------
-  const [modal, setModal] = useState({
-    open: false,
-    title: '',
-    message: '',
-    actions: [], // [{ label: 'Upgrade Plan', onClick: () => {} }]
-  });
+  const [modal, setModal] = useState({ open: false, title: '', message: '', actions: [] });
+  const openModal = useCallback(
+    ({ title, message, actions = [] }) => setModal({ open: true, title, message, actions }),
+    []
+  );
+  const closeModal = useCallback(() => setModal((m) => ({ ...m, open: false })), []);
 
-  const openModal = ({ title, message, actions = [] }) =>
-    setModal({ open: true, title, message, actions });
+  // NEW: Custom limit modal state
+  const [limitModalOpen, setLimitModalOpen] = useState(false);
 
-  const closeModal = () => setModal((m) => ({ ...m, open: false }));
-
-  // Auth guard + seed from local cache immediately (no flicker)
+  // persist theme
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+    try {
+      const s = localStorage.getItem('pp_dark');
+      if (s != null) setDarkMode(s === '1');
+    } catch {}
+  }, []);
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', darkMode);
+    try {
+      localStorage.setItem('pp_dark', darkMode ? '1' : '0');
+    } catch {}
+  }, [darkMode]);
+
+  // auth + cache seeds
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
-
-        // 1) Seed quickly from local cache if available (prevents "no plan" flash)
+        // local seed
         try {
           const raw = localStorage.getItem(subCacheKey(u.uid));
           if (raw) {
             const cache = JSON.parse(raw);
-            if (typeof cache?.active === 'boolean') {
-              setSubActive(!!cache.active);
-            }
+            if (typeof cache?.active === 'boolean') setSubActive(!!cache.active);
             if (cache?.plan && PLAN_LIMITS[cache.plan] != null) {
               setPlanName(cache.plan);
-              setDailyLimit(PLAN_LIMITS[cache.plan]);
+              setDailyLimit((dl) => (typeof dl === 'number' ? dl : PLAN_LIMITS[cache.plan]));
             }
+            setSubStatus(cache.status || null);
           }
         } catch {}
-
-        // 2) Firestore fallback seed
+        // firestore seed
         try {
           const db = getFirestore();
           const snap = await getDoc(doc(db, 'users', u.uid));
           const d = snap.exists() ? snap.data() : {};
           const rawPlan = String(d?.activePlan || d?.plan || d?.tier || '').toLowerCase();
           const max = PLAN_LIMITS[rawPlan] ?? 0;
-          setPlanName((p) => p || rawPlan || null); // don't overwrite cache if it already set
+          setPlanName((p) => p || rawPlan || null);
           if (max) setDailyLimit((dl) => (typeof dl === 'number' ? dl : max));
-        } catch {
-          // ignore
-        } finally {
+        } catch {} finally {
           setFsLoaded(true);
         }
       } else {
@@ -121,34 +165,37 @@ export default function UtilityPage() {
       }
       setAuthChecked(true);
     });
-    return () => unsubscribe();
+    return () => unsub();
   }, []);
 
-  // Redirect decision AFTER auth is checked (flicker-proof)
+  // redirect after auth check
   useEffect(() => {
     if (!authChecked) return;
-
     if (!user) {
       let justSignedUp = false;
-      try { justSignedUp = !!localStorage.getItem('justSignedUp'); } catch {}
+      try {
+        justSignedUp = !!localStorage.getItem('justSignedUp');
+      } catch {}
       if (justSignedUp) return;
       router.replace('/login');
     } else {
-      try { localStorage.removeItem('justSignedUp'); } catch {}
+      try {
+        localStorage.removeItem('justSignedUp');
+      } catch {}
     }
   }, [authChecked, user, router]);
 
-  // ---- Single-active-session guard (minimal + safe) ----
+  // single-session guard
   useEffect(() => {
     if (!user?.uid) return;
     const db = getFirestore();
     const ref = doc(db, 'users', user.uid);
     const mySessionId = getOrCreateSessionId();
-
-    // Claim (last-login wins)
-    setDoc(ref, { activeSessionId: mySessionId, sessionUpdatedAt: serverTimestamp() }, { merge: true }).catch(() => {});
-
-    // Watch for takeover by another device and sign out here if so
+    setDoc(
+      ref,
+      { activeSessionId: mySessionId, sessionUpdatedAt: serverTimestamp() },
+      { merge: true }
+    ).catch(() => {});
     const unsub = onSnapshot(ref, (snap) => {
       const data = snap.exists() ? snap.data() : {};
       const active = data?.activeSessionId;
@@ -159,12 +206,7 @@ export default function UtilityPage() {
     return () => unsub();
   }, [user?.uid]);
 
-  // Theme toggle (unchanged)
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', darkMode);
-  }, [darkMode]);
-
-  const handleSignOut = async () => {
+  const handleSignOut = useCallback(async () => {
     try {
       await signOut(auth);
       router.replace('/login');
@@ -173,17 +215,23 @@ export default function UtilityPage() {
         title: 'Sign out failed',
         message: 'We could not sign you out. Please try again.',
         actions: [
-          { label: 'Try Again', onClick: () => { closeModal(); handleSignOut(); } },
+          {
+            label: 'Try Again',
+            onClick: () => {
+              closeModal();
+              handleSignOut();
+            },
+          },
         ],
       });
     }
-  };
+  }, [router, openModal, closeModal]);
 
-  // -------- Customer Portal helper (used by "Upgrade Plan") --------
-  const goToCustomerPortal = async () => {
+  const goToCustomerPortal = useCallback(async () => {
     try {
       const u = auth.currentUser;
       if (!u) {
+        setLimitModalOpen(false);
         closeModal();
         router.push('/login');
         return;
@@ -195,138 +243,179 @@ export default function UtilityPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data?.url) {
+        setLimitModalOpen(false);
         closeModal();
         window.location.href = data.url;
       } else {
         openModal({
           title: 'Unable to open portal',
           message: data?.error || 'We could not open the customer portal. Please try again.',
-          actions: [{ label: 'Try Again', onClick: () => { closeModal(); goToCustomerPortal(); } }],
+          actions: [
+            {
+              label: 'Try Again',
+              onClick: () => {
+                closeModal();
+                goToCustomerPortal();
+              },
+            },
+          ],
         });
       }
-    } catch (e) {
+    } catch {
       openModal({
         title: 'Unable to open portal',
         message: 'A network error occurred. Please check your connection and try again.',
-        actions: [{ label: 'Try Again', onClick: () => { closeModal(); goToCustomerPortal(); } }],
-      });
-    }
-  };
-
-  // ---------- Friendly error helper -> uses modal ----------
-  function showFriendlyError({ status, code, msg }) {
-    const m = String(msg || '').toLowerCase();
-
-    // helper to persist remaining whenever we set it here
-    const persistRemaining = (val) => {
-      setRemaining(val);
-      try {
-        if (user?.uid) localStorage.setItem(remainingKey(user.uid, planName), String(val));
-      } catch {}
-    };
-
-    if (status === 401 && /invalid|expired|token|unauthorized/.test(m)) {
-      openModal({
-        title: 'Session expired',
-        message: 'Your session has expired. Please sign in again to continue.',
         actions: [
-          { label: 'Sign In', onClick: () => { closeModal(); router.push('/login'); } },
+          {
+            label: 'Try Again',
+            onClick: () => {
+              closeModal();
+              goToCustomerPortal();
+            },
+          },
         ],
       });
-      return;
     }
+  }, [router, openModal, closeModal]);
 
-    if (code === 'NO_PLAN' || /no active subscription|buy a plan|no active plan/.test(m)) {
-      openModal({
-        title: 'No active subscription',
-        message: 'You do not have an active plan. To run comparisons, please choose a plan.',
-        actions: [
-          { label: 'View Plans', onClick: () => { closeModal(); router.push('/'); } },
-        ],
-      });
-      persistRemaining(0);
-      return;
-    }
+  const showFriendlyError = useCallback(
+    ({ status, code, msg }) => {
+      const m = String(msg || '').toLowerCase();
+      const persistRemaining = (val) => {
+        setRemaining(val);
+        try {
+          if (user?.uid) localStorage.setItem(remainingKey(user.uid, planName), String(val));
+        } catch {}
+      };
 
-    if (status === 429 || code === 'LIMIT_EXCEEDED' || /daily limit/.test(m)) {
-      openModal({
-        title: 'Daily limit reached',
-        message: 'You have reached the daily comparison limit for your plan. Upgrade to run more comparisons today.',
-        actions: [
-          { label: 'Upgrade Plan', onClick: () => { goToCustomerPortal(); } },
-        ],
-      });
-      persistRemaining(0);
-      return;
-    }
-
-    if (status === 400) {
-      if (/both images are required/i.test(m)) {
+      if (status === 401 && /invalid|expired|token|unauthorized/.test(m)) {
         openModal({
-          title: 'Two images required',
-          message: 'Please upload both the design and the development screenshot before starting a comparison.',
+          title: 'Session expired',
+          message: 'Your session has expired. Please sign in again to continue.',
           actions: [
-            { label: 'Got it', onClick: () => { closeModal(); } },
+            {
+              label: 'Sign In',
+              onClick: () => {
+                closeModal();
+                router.push('/login');
+              },
+            },
           ],
         });
         return;
       }
-      if (/only jpg|png|webp/i.test(m)) {
+      if (code === 'NO_PLAN' || /no active subscription|buy a plan|no active plan/.test(m)) {
         openModal({
-          title: 'Unsupported image format',
-          message: 'Use JPG, PNG, or WEBP files (minimum width 500px) for best results.',
+          title: 'No active subscription',
+          message: 'You do not have an active plan. To run comparisons, please choose a plan.',
           actions: [
-            { label: 'Got it', onClick: () => { closeModal(); } },
+            {
+              label: 'View Plans',
+              onClick: () => {
+                closeModal();
+                router.push('/');
+              },
+            },
           ],
+        });
+        persistRemaining(0);
+        return;
+      }
+      if (status === 429 || code === 'LIMIT_EXCEEDED' || /daily limit/.test(m)) {
+        setLimitModalOpen(true); // use custom modal
+        persistRemaining(0);
+        return;
+      }
+      if (status === 400) {
+        if (/both images are required/i.test(m)) {
+          openModal({
+            title: 'Two images required',
+            message:
+              'Please upload both the design and the development screenshot before starting a comparison.',
+            actions: [{ label: 'Got it', onClick: () => { closeModal(); } }],
+          });
+          return;
+        }
+        if (/only jpg|png|webp/i.test(m)) {
+          openModal({
+            title: 'Unsupported image format',
+            message: 'Use JPG, PNG, or WEBP files (minimum width 500px) for best results.',
+            actions: [{ label: 'Got it', onClick: () => { closeModal(); } }],
+          });
+          return;
+        }
+      }
+      if (/failed to fetch|network/.test(m)) {
+        openModal({
+          title: 'Network issue',
+          message: 'We could not reach the server. Please check your internet connection and try again.',
+          actions: [{ label: 'Retry', onClick: () => { closeModal(); } }],
         });
         return;
       }
-    }
-
-    if (/failed to fetch|network/.test(m)) {
       openModal({
-        title: 'Network issue',
-        message: 'We could not reach the server. Please check your internet connection and try again.',
-        actions: [
-          { label: 'Retry', onClick: () => { closeModal(); } },
-        ],
+        title: 'Comparison failed',
+        message: 'We couldn’t complete the comparison. Please try again in a minute.',
+        actions: [{ label: 'Retry', onClick: () => { closeModal(); } }],
       });
-      return;
-    }
+    },
+    [router, closeModal, openModal, planName, user?.uid]
+  );
 
-    openModal({
-      title: 'Comparison failed',
-      message: 'We couldn’t complete the comparison. Please try again in a minute.',
-      actions: [
-        { label: 'Retry', onClick: () => { closeModal(); } },
-      ],
-    });
-  }
-
-  // ----- Ask server (Stripe) for current subscription status -----
+  // subscription-status fetch (TTL + abort)
   useEffect(() => {
     const run = async () => {
       if (!authChecked || !user) return;
+
+      // TTL cache
+      try {
+        const raw = localStorage.getItem(subCacheKey(user.uid));
+        if (raw) {
+          const cache = JSON.parse(raw);
+          if (cache?.t && Date.now() - cache.t < SUB_CACHE_TTL_MS) {
+            setSubActive(!!cache.active);
+            if (cache?.plan && PLAN_LIMITS[cache.plan] != null) {
+              setPlanName(cache.plan);
+              setDailyLimit((dl) => (typeof dl === 'number' ? dl : PLAN_LIMITS[cache.plan]));
+            }
+            setSubStatus(cache.status || null);
+            setSubChecked(true);
+            return;
+          }
+        }
+      } catch {}
+
+      if (subReqAbort.current) {
+        try {
+          subReqAbort.current.abort();
+        } catch {}
+      }
+      const controller = new AbortController();
+      subReqAbort.current = controller;
+
       try {
         const idToken = await auth.currentUser.getIdToken();
         const res = await fetch('/api/subscription-status', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+          signal: controller.signal,
         });
         const data = await res.json().catch(() => ({}));
 
         if (res.ok) {
           setSubActive(!!data.active);
           setSubStatus(data.status || null);
-
-          // cache result to avoid refresh flicker later
           try {
             localStorage.setItem(
               subCacheKey(user.uid),
-              JSON.stringify({ active: !!data.active, plan: data.plan || null, status: data.status || null, t: Date.now() })
+              JSON.stringify({
+                active: !!data.active,
+                plan: data.plan || null,
+                status: data.status || null,
+                t: Date.now(),
+              })
             );
           } catch {}
-
           if (data.plan && PLAN_LIMITS[data.plan] != null) {
             setPlanName(data.plan);
             setDailyLimit(PLAN_LIMITS[data.plan]);
@@ -335,52 +424,126 @@ export default function UtilityPage() {
           console.warn('subscription-status error:', data?.error || res.status);
         }
       } catch (e) {
-        console.warn('subscription-status fetch failed:', e);
+        if (e?.name !== 'AbortError') console.warn('subscription-status fetch failed:', e);
       } finally {
+        subReqAbort.current = null;
         setSubChecked(true);
       }
     };
     run();
+    return () => {
+      if (subReqAbort.current) {
+        try {
+          subReqAbort.current.abort();
+        } catch {}
+        subReqAbort.current = null;
+      }
+    };
   }, [authChecked, user]);
 
-  // ----- Initialize/persist remaining whenever plan/limit ready -----
+  // compute an "effective" limit immediately from plan
+  const effectiveLimit =
+    typeof dailyLimit === 'number' && dailyLimit >= 0
+      ? dailyLimit
+      : planName && PLAN_LIMITS[planName] != null
+      ? PLAN_LIMITS[planName]
+      : null;
+
+  // init remaining when limit known
   useEffect(() => {
     if (!user?.uid) return;
-    if (typeof dailyLimit !== 'number') return;
-
-    // load from localStorage (per day, per plan). If none, seed with full dailyLimit.
+    if (typeof effectiveLimit !== 'number') return;
     try {
       const key = remainingKey(user.uid, planName);
       const raw = localStorage.getItem(key);
       const stored = raw != null ? parseInt(raw, 10) : NaN;
-      const next = Number.isFinite(stored) ? Math.max(0, Math.min(dailyLimit, stored)) : dailyLimit;
+      const next = Number.isFinite(stored)
+        ? Math.max(0, Math.min(effectiveLimit, stored))
+        : effectiveLimit;
       setRemaining(next);
-      localStorage.setItem(key, String(next)); // ensure it exists for future refreshes
+      localStorage.setItem(key, String(next));
     } catch {
-      setRemaining(dailyLimit);
+      setRemaining(effectiveLimit);
     }
-  }, [user?.uid, planName, dailyLimit]);
+  }, [user?.uid, planName, effectiveLimit]);
 
-  const handleCompare = async () => {
+  const onPickImage1 = useCallback(
+    (e) => {
+      const f = e.target.files?.[0];
+      const v = validateFile(f);
+      if (!v.ok) {
+        setImage1(null);
+        openModal({
+          title: 'Invalid file',
+          message: v.msg === 'Unsupported type' ? 'Use JPG, PNG, or WEBP files.' : 'Max size is 15MB.',
+        });
+        return;
+      }
+      setImage1(f);
+    },
+    [openModal]
+  );
+  const onPickImage2 = useCallback(
+    (e) => {
+      const f = e.target.files?.[0];
+      const v = validateFile(f);
+      if (!v.ok) {
+        setImage2(null);
+        openModal({
+          title: 'Invalid file',
+          message: v.msg === 'Unsupported type' ? 'Use JPG, PNG, or WEBP files.' : 'Max size is 15MB.',
+        });
+        return;
+      }
+      setImage2(f);
+    },
+    [openModal]
+  );
+
+  const getFreshIdToken = useCallback(async () => {
+    const u = auth.currentUser;
+    if (!u) throw new Error('Please sign in first.');
+    try {
+      return await u.getIdToken();
+    } catch {
+      return await u.getIdToken(true);
+    }
+  }, []);
+
+  const handleCompare = useCallback(async () => {
+    if (compareInFlight.current) return;
+
+    // NEW: Guard only shows modal, doesn't disable the button globally
+    if (typeof remaining === 'number' && remaining <= 0) {
+      setLimitModalOpen(true);
+      return;
+    }
+
     if (!image1 || !image2) {
       openModal({
         title: 'Two images required',
-        message: 'Please upload both the design and the development screenshot before starting a comparison.',
+        message:
+          'Please upload both the design and the development screenshot before starting a comparison.',
         actions: [{ label: 'Got it', onClick: () => { closeModal(); } }],
       });
       return;
     }
+    const v1 = validateFile(image1);
+    const v2 = validateFile(image2);
+    if (!v1.ok || !v2.ok) {
+      openModal({ title: 'Invalid file(s)', message: 'Use JPG, PNG, or WEBP (max 15MB).' });
+      return;
+    }
 
+    compareInFlight.current = true;
     setLoading(true);
     setComparisonResult(null);
 
     try {
-      const token = await auth.currentUser.getIdToken();
-
+      const token = await getFreshIdToken();
       const formData = new FormData();
       formData.append('image1', image1);
       formData.append('image2', image2);
-
       setFileMeta({
         fileName1: image1.name,
         fileName2: image2.name,
@@ -392,7 +555,6 @@ export default function UtilityPage() {
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
-
       const raw = await response.text();
       let data;
       try {
@@ -407,53 +569,63 @@ export default function UtilityPage() {
         showFriendlyError({ status: response.status, code, msg });
         throw new Error(String(msg));
       }
-
       if (!data.result) throw new Error('Comparison result missing in response.');
-
       setComparisonResult(data.result);
 
-      // decrement + persist remaining locally
       setRemaining((prev) => {
-        const next = typeof prev === 'number'
-          ? Math.max(prev - 1, 0)
-          : (typeof dailyLimit === 'number' ? Math.max(dailyLimit - 1, 0) : 0);
+        const seed =
+          typeof prev === 'number' ? prev : typeof effectiveLimit === 'number' ? effectiveLimit : 0;
+        const next = Math.max(seed - 1, 0);
         try {
           if (user?.uid) localStorage.setItem(remainingKey(user.uid, planName), String(next));
         } catch {}
         return next;
       });
-    } catch (error) {
-      console.error('Comparison failed:', error);
+    } catch (err) {
+      console.error('Comparison failed:', err);
     } finally {
       setLoading(false);
+      compareInFlight.current = false;
     }
-  };
+  }, [
+    image1,
+    image2,
+    getFreshIdToken,
+    showFriendlyError,
+    effectiveLimit,
+    planName,
+    user?.uid,
+    openModal,
+    closeModal,
+    remaining,
+  ]);
 
-  // ---- SUBSCRIPTION-BASED UI STATE ----
-  const hasActivePlan = subActive || (typeof dailyLimit === 'number' && dailyLimit > 0);
-  // Only show the "no plan" UI once at least one backend check has finished
-  const showNoPlanUI = (!hasActivePlan) && (fsLoaded || subChecked);
+  // derived flags
+  const hasActivePlan = !!subActive || (typeof effectiveLimit === 'number' && effectiveLimit > 0);
+  // NOTE: Button will NOT be disabled when remaining <= 0; we'll show modal on click instead.
+  const showNoPlanUI = authChecked && !hasActivePlan && (fsLoaded || subChecked);
 
-  // File input button styling
+  // For modal display
+  const usedToday = useMemo(() => {
+    if (typeof remaining !== 'number' || typeof effectiveLimit !== 'number') return null;
+    const used = Math.max(0, effectiveLimit - remaining);
+    const pct = effectiveLimit ? Math.min(100, Math.round((used / effectiveLimit) * 100)) : 0;
+    return { used, pct };
+  }, [remaining, effectiveLimit]);
+
+  const resetAt = useMemo(() => formatTime(nextMidnightLocal()), []);
+
   const fileInputBase =
-    "w-full cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold";
+    'w-full cursor-pointer file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold';
   const fileInputStyleActive =
-    "file:bg-purple-600 file:text-white hover:file:bg-purple-700 hover:file:text-white";
+    'file:bg-purple-600 file:text-white hover:file:bg-purple-700 hover:file:text-white';
   const fileInputStyleInactive =
-    "file:bg-purple-100 file:text-purple-900 hover:file:bg-purple-200 hover:file:text-white";
+    'file:bg-purple-100 file:text-purple-900 hover:file:bg-purple-200 hover:file:text-white';
 
-  const renderPreview = (file) =>
-    file ? (
-      <img
-        src={URL.createObjectURL(file)}
-        alt="Preview"
-        className="rounded shadow h-40 object-contain w-full mt-2"
-      />
-    ) : null;
+  const prev1 = useObjectUrl(image1);
+  const prev2 = useObjectUrl(image2);
 
-  if (!user) {
-    return <></>;
-  }
+  if (!user) return <></>;
 
   return (
     <div className="min-h-screen bg-white text-gray-900 dark:bg-gray-900 dark:text-white font-sans">
@@ -473,65 +645,81 @@ export default function UtilityPage() {
 
         <p className="text-lg font-semibold">Design QA, Automated with AI</p>
         <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">
-          Upload your original design and final build screenshots. Let AI catch visual bugs before your clients do.
+          Upload your original design and final build screenshots. Let AI catch visual bugs before
+          your clients do.
         </p>
 
         <p className="text-sm text-gray-700 dark:text-gray-300 mb-6">
           Remaining comparisons today:{' '}
           <strong>
-            {typeof remaining === 'number' && typeof dailyLimit === 'number'
-              ? `${remaining}/${dailyLimit}`
+            {typeof remaining === 'number' && typeof effectiveLimit === 'number'
+              ? `${remaining}/${effectiveLimit}`
               : '—'}
           </strong>
-          {planName ? ` (plan: ${planName}${subStatus ? ` • ${subStatus}` : ''})` : (subStatus ? ` (${subStatus})` : '')}
+          {planName
+            ? ` (plan: ${planName}${subStatus ? ` • ${subStatus}` : ''})`
+            : subStatus
+            ? ` (${subStatus})`
+            : ''}
         </p>
 
         <div className="border p-4 rounded bg-gray-50 dark:bg-gray-800 prose dark:prose-invert mb-10">
           <h2 className="font-semibold">How to Use</h2>
           <ul>
             <li>Upload the design and development screenshots</li>
-            <li>Supported: JPG, PNG, WEBP – min width 500px</li>
+            <li>Supported: JPG, PNG, WEBP – max 15MB, min width 500px</li>
             <li>Ensure matching layout and scale</li>
           </ul>
         </div>
 
         <div className="grid md:grid-cols-2 gap-6">
-          {/* Upload Design */}
           <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg-white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale-[1.01]">
-            <label className="block font-semibold text-gray-800 dark:text-white mb-2">Upload Design</label>
+            <label className="block font-semibold text-gray-800 dark:text-white mb-2">
+              Upload Design
+            </label>
             <input
               type="file"
-              onChange={(e) => setImage1(e.target.files[0])}
-              accept="image/*"
-              className={`${fileInputBase} ${hasActivePlan ? fileInputStyleActive : fileInputStyleInactive}`}
+              onChange={onPickImage1}
+              accept="image/jpeg,image/png,image/webp"
+              className={`${fileInputBase} ${
+                hasActivePlan ? fileInputStyleActive : fileInputStyleInactive
+              }`}
             />
-            {renderPreview(image1)}
+            {prev1 && (
+              <img src={prev1} alt="Preview" className="rounded shadow h-40 object-contain w-full mt-2" />
+            )}
           </div>
 
-          {/* Upload Dev */}
           <div className="border-2 border-dashed border-purple-300 p-6 rounded-lg text-center bg-white dark:bg-gray-700 hover:border-purple-500 transition transform hover:scale-[1.01]">
-            <label className="block font-semibold text-gray-800 dark:text-white mb-2">Upload Development Screenshot</label>
+            <label className="block font-semibold text-gray-800 dark:text-white mb-2">
+              Upload Development Screenshot
+            </label>
             <input
               type="file"
-              onChange={(e) => setImage2(e.target.files[0])}
-              accept="image/*"
-              className={`${fileInputBase} ${hasActivePlan ? fileInputStyleActive : fileInputStyleInactive}`}
+              onChange={onPickImage2}
+              accept="image/jpeg,image/png,image/webp"
+              className={`${fileInputBase} ${
+                hasActivePlan ? fileInputStyleActive : fileInputStyleInactive
+              }`}
             />
-            {renderPreview(image2)}
+            {prev2 && (
+              <img src={prev2} alt="Preview" className="rounded shadow h-40 object-contain w-full mt-2" />
+            )}
           </div>
         </div>
 
         <div className="mt-10 flex items-center gap-4 flex-wrap">
           <button
             onClick={handleCompare}
-            disabled={!hasActivePlan || loading}
-            className={`bg-purple-800 hover:bg-purple-900 text-white px-6 py-3 rounded-lg font-semibold shadow transition
-              ${(!hasActivePlan || loading) ? 'opacity-60 cursor-not-allowed' : ''}`}
+            // IMPORTANT: plan-based disable only (plus loading/images)
+            disabled={!hasActivePlan || loading || !image1 || !image2}
+            className={`bg-purple-800 hover:bg-purple-900 text-white px-6 py-3 rounded-lg font-semibold shadow transition ${
+              !hasActivePlan || loading || !image1 || !image2 ? 'opacity-60 cursor-not-allowed' : ''
+            }`}
           >
             {loading ? 'Comparing...' : 'Start Comparison'}
           </button>
 
-          {/* If NO active subscription, show buy-plan hint + Plans button (only after checks ready) */}
           {showNoPlanUI && (
             <>
               <span className="text-sm text-red-600">
@@ -551,11 +739,19 @@ export default function UtilityPage() {
 
         {comparisonResult && (
           <div className="mt-10 bg-gray-100 dark:bg-gray-800 p-6 rounded-lg shadow-lg">
-            <h2 className="text-xl font-bold mb-4 text-purple-800 dark:text-purple-300">Visual Bug Report</h2>
+            <h2 className="text-xl font-bold mb-4 text-purple-800 dark:text-purple-300">
+              Visual Bug Report
+            </h2>
             <ul className="text-sm mb-4">
-              <li><strong>File 1:</strong> {fileMeta.fileName1}</li>
-              <li><strong>File 2:</strong> {fileMeta.fileName2}</li>
-              <li><strong>Timestamp:</strong> {fileMeta.timestamp}</li>
+              <li>
+                <strong>File 1:</strong> {fileMeta.fileName1}
+              </li>
+              <li>
+                <strong>File 2:</strong> {fileMeta.fileName2}
+              </li>
+              <li>
+                <strong>Timestamp:</strong> {fileMeta.timestamp}
+              </li>
             </ul>
             <div className="prose dark:prose-invert max-w-none text-sm">
               <ReactMarkdown>{comparisonResult}</ReactMarkdown>
@@ -565,24 +761,23 @@ export default function UtilityPage() {
         )}
       </div>
 
-      {/* ---------- Custom Modal ---------- */}
+      {/* Generic Modal (existing) */}
       <div
-        className={`fixed inset-0 z-[100] transition-opacity duration-200 ${modal.open ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}
+        className={`fixed inset-0 z-[100] transition-opacity duration-200 ${
+          modal.open ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+        }`}
         onClick={closeModal}
         aria-hidden={!modal.open}
       >
-        {/* Backdrop */}
         <div className="absolute inset-0 bg-black/40" />
-
-        {/* Panel */}
         <div className="absolute inset-0 flex items-center justify-center p-4">
           <div
             role="dialog"
             aria-modal="true"
             onClick={(e) => e.stopPropagation()}
-            className={`w-full max-w-md rounded-xl bg-white dark:bg-gray-900 shadow-2xl border border-gray-200 dark:border-gray-800 p-5 transform transition-all duration-200
-              ${modal.open ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 translate-y-2'}
-            `}
+            className={`w-full max-w-md rounded-xl bg-white dark:bg-gray-900 shadow-2xl border border-gray-200 dark:border-gray-800 p-5 transform transition-all duration-200 ${
+              modal.open ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 translate-y-2'
+            }`}
           >
             <div className="flex items-start justify-between mb-3">
               <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{modal.title}</h3>
@@ -591,15 +786,16 @@ export default function UtilityPage() {
                 aria-label="Close"
                 className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300"
               >
-                {/* X icon */}
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                  <path
+                    fillRule="evenodd"
+                    d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                    clipRule="evenodd"
+                  />
                 </svg>
               </button>
             </div>
-
             <p className="text-sm text-gray-700 dark:text-gray-300 mb-5">{modal.message}</p>
-
             <div className="flex flex-wrap gap-3 justify-end">
               {modal.actions?.map((a, idx) => (
                 <button
@@ -610,7 +806,6 @@ export default function UtilityPage() {
                   {a.label}
                 </button>
               ))}
-              {/* Default close if no actions */}
               {(!modal.actions || modal.actions.length === 0) && (
                 <button
                   onClick={closeModal}
@@ -624,7 +819,73 @@ export default function UtilityPage() {
         </div>
       </div>
 
-      {/* Modal animation helper (no heavy CSS) */}
+      {/* NEW: Custom Daily Limit Modal */}
+      <div
+        className={`fixed inset-0 z-[110] ${
+          limitModalOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+        } transition-opacity`}
+        onClick={() => setLimitModalOpen(false)}
+        aria-hidden={!limitModalOpen}
+      >
+        <div className="absolute inset-0 bg-black/50" />
+        <div className="absolute inset-0 flex items-center justify-center p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+            className={`w-full max-w-lg rounded-2xl bg-white dark:bg-gray-900 shadow-2xl border border-purple-200 dark:border-purple-900 p-6 transform transition-all ${
+              limitModalOpen ? 'opacity-100 scale-100 translate-y-0' : 'opacity-0 scale-95 translate-y-2'
+            }`}
+          >
+            <div className="flex items-center gap-3 mb-3">
+              <div className="h-10 w-10 rounded-full bg-purple-100 dark:bg-purple-800 flex items-center justify-center">
+                ⚠️
+              </div>
+              <h3 className="text-xl font-bold text-purple-800 dark:text-purple-300">
+                Daily limit reached
+              </h3>
+            </div>
+
+            <p className="text-sm text-gray-700 dark:text-gray-300 mb-4">
+              You’ve used all comparisons for today on the <strong>{planName || '—'}</strong> plan.
+            </p>
+
+            <div className="mb-4">
+              <div className="h-2 w-full rounded bg-gray-200 dark:bg-gray-800 overflow-hidden">
+                <div
+                  className="h-full bg-purple-600 dark:bg-purple-500 transition-all"
+                  style={{ width: `${usedToday?.pct ?? 100}%` }}
+                />
+              </div>
+              <p className="mt-2 text-xs text-gray-600 dark:text-gray-400">
+                Used {usedToday?.used ?? (effectiveLimit ?? 0)} of {effectiveLimit ?? '—'} today • Resets at {resetAt}
+              </p>
+            </div>
+
+            <ul className="list-disc pl-5 text-sm text-gray-700 dark:text-gray-300 space-y-1 mb-5">
+              <li>Try again tomorrow when the counter resets.</li>
+              <li>Need more runs today? Upgrade your plan for a higher daily limit.</li>
+              <li>Tip: Batch related screens into a single session to save runs.</li>
+            </ul>
+
+            <div className="flex flex-wrap gap-3 justify-end">
+              <button
+                onClick={() => setLimitModalOpen(false)}
+                className="px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-800 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
+              >
+                OK
+              </button>
+              <button
+                onClick={goToCustomerPortal}
+                className="px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-800 text-white font-semibold shadow"
+              >
+                Upgrade plan
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <style jsx>{``}</style>
     </div>
   );

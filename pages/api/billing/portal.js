@@ -1,78 +1,62 @@
 // pages/api/billing/portal.js
-import { authAdmin, db } from "@/lib/firebase/firebaseAdmin";
 import { stripe } from "@/lib/stripe/stripe";
+import { authAdmin } from "@/lib/firebase/firebaseAdmin";
+
+async function findOrCreateCustomerByEmail(email, uid) {
+  try {
+    const search = await stripe.customers.search({
+      query: `email:'${String(email).replace(/'/g, "\\'")}'`,
+      limit: 1,
+    });
+    if (search?.data?.length) return search.data[0].id;
+  } catch {}
+  try {
+    const list = await stripe.customers.list({ email, limit: 1 });
+    if (list?.data?.length) return list.data[0].id;
+  } catch {}
+  const created = await stripe.customers.create({
+    email,
+    metadata: uid ? { uid } : undefined,
+  });
+  return created.id;
+}
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method Not Allowed" });
-  }
+  if (req.method !== "POST")
+    return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    // 1) Verify Firebase ID token (required)
-    const authHeader = req.headers.authorization || "";
-    const idToken = authHeader.startsWith("Bearer ")
-      ? authHeader.slice(7)
-      : null;
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Missing ID token" });
 
-    if (!idToken) {
-      return res.status(401).json({ error: "Missing Authorization Bearer token" });
-    }
+    const decoded = await authAdmin.verifyIdToken(token);
+    const email = decoded.email;
+    if (!email) return res.status(400).json({ error: "User email is required" });
 
-    const decoded = await authAdmin.verifyIdToken(idToken);
-    const uid = decoded.uid;
+    const customerId = await findOrCreateCustomerByEmail(email, decoded.uid);
 
-    // 2) Load Firestore user to get Stripe IDs
-    const snap = await db.collection("users").doc(uid).get();
-    if (!snap.exists) {
-      return res.status(404).json({ error: "User doc not found" });
-    }
-    const user = snap.data();
+    const base = (
+      process.env.NEXT_PUBLIC_SITE_URL ||
+      process.env.SITE_URL ||
+      process.env.NEXT_PUBLIC_BASE_URL ||
+      "https://finalpixel.vercel.app"
+    )
+      .toString()
+      .replace(/\/$/, "");
 
-    const customerId = user.stripeCustomerId;
-    const subscriptionId = user.subscriptionId || null;
-
-    if (!customerId) {
-      return res.status(400).json({ error: "No stripeCustomerId on user" });
-    }
-
-    // 3) Optional flow selection
-    const { action } = req.body || {};
-    let flow_data = undefined;
-
-    if (action === "cancel" && subscriptionId) {
-      flow_data = {
-        type: "subscription_cancel",
-        subscription_cancel: {
-          subscription: subscriptionId,
-        },
-      };
-    } else if ((action === "upgrade" || action === "downgrade") && subscriptionId) {
-      flow_data = {
-        type: "subscription_update",
-        subscription_update: {
-          subscription: subscriptionId,
-        },
-      };
-    }
-
-    // 4) Compute a safe return URL (env → request host → final fallback)
-    const envOrigin = ("https://finalpixel.vercel.app" || "").trim();
-    const headerOrigin = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}`;
-    const origin = envOrigin
-      ? envOrigin.replace(/\/$/, "")
-      : (req.headers?.host ? headerOrigin : "https://finalpixel.vercel.app");
-    const return_url = `${origin}/accounts`;
-
-    // 5) Create the Billing Portal session
-    const session = await stripe.billingPortal.sessions.create({
+    const portal = await stripe.billingPortal.sessions.create({
       customer: customerId,
-      return_url,
-      ...(flow_data ? { flow_data } : {}),
+      return_url: `${base}/accounts`,
     });
 
-    return res.status(200).json({ url: session.url });
-  } catch (err) {
-    console.error("[portal] error:", err);
-    return res.status(400).json({ error: err.message });
+    return res.status(200).json({ url: portal.url });
+  } catch (e) {
+    console.error("portal error", e);
+    return res.status(500).json({ error: "Internal error" });
   }
 }
+
+
+// pages/api/portal.js
+// export { default } from "@/pages/api/billing/portal";
