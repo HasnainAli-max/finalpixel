@@ -249,11 +249,11 @@ export default function Accounts() {
     });
   };
 
-  // NEW: Resume click (for “Won’t cancel subscription”)
-  const handleResumeClick = () => {
-    // Send to update flow; portal shows a "Resume" action if cancel is scheduled
-    openPortal("update");
-  };
+  // Won’t cancel subscription:
+const handleResumeClick = () => {
+  openPortal("resume");
+};
+
 
   // 4) derived values for UI (Stripe-first)
   const view = useMemo(() => {
