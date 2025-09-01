@@ -12,6 +12,8 @@ import ReactMarkdown from 'react-markdown';
 const PLAN_LIMITS = { basic: 1, pro: 2, elite: 3 };
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024;
+// We still write a short-lived cache, but we DO NOT rely on it for initial render.
+// This avoids the "buy a plan" flicker after payment.
 const SUB_CACHE_TTL_MS = 60 * 1000;
 
 function getOrCreateSessionId() {
@@ -35,8 +37,9 @@ function todayStr() {
   const dd = String(d.getDate()).padStart(2, '0');
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
-function remainingKey(uid, plan) {
-  return `pp_remaining_${uid}_${plan || 'none'}_${todayStr()}`;
+// Used-count is authoritative for the day (prevents downgrade loophole)
+function usedKey(uid) {
+  return `pp_used_${uid}_${todayStr()}`;
 }
 function subCacheKey(uid) {
   return `pp_sub_cache_${uid}`;
@@ -62,7 +65,6 @@ function useObjectUrl(file) {
   return url;
 }
 
-// Helpers for limit modal
 function nextMidnightLocal() {
   const d = new Date();
   d.setHours(24, 0, 0, 0);
@@ -92,13 +94,16 @@ export default function UtilityPage() {
 
   const [planName, setPlanName] = useState(null);
   const [dailyLimit, setDailyLimit] = useState(null);
-  const [remaining, setRemaining] = useState(null);
+  const [usedTodayCount, setUsedTodayCount] = useState(null);
 
   const [subActive, setSubActive] = useState(false);
   const [subStatus, setSubStatus] = useState(null);
 
   const [fsLoaded, setFsLoaded] = useState(false);
+
+  // Subscription fetch flags
   const [subChecked, setSubChecked] = useState(false);
+  const [subLoading, setSubLoading] = useState(false); // for entry loader
 
   const compareInFlight = useRef(false);
   const subReqAbort = useRef(null);
@@ -112,10 +117,9 @@ export default function UtilityPage() {
   );
   const closeModal = useCallback(() => setModal((m) => ({ ...m, open: false })), []);
 
-  // NEW: Custom limit modal state
   const [limitModalOpen, setLimitModalOpen] = useState(false);
 
-  // persist theme
+  // Theme
   useEffect(() => {
     try {
       const s = localStorage.getItem('pp_dark');
@@ -129,12 +133,12 @@ export default function UtilityPage() {
     } catch {}
   }, [darkMode]);
 
-  // auth + cache seeds
+  // Auth + quick seeds (cache + Firestore for banner/no-flicker)
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
-        // local seed
+        // Read cache only to prefill banner quickly (we will still do a live fetch)
         try {
           const raw = localStorage.getItem(subCacheKey(u.uid));
           if (raw) {
@@ -147,7 +151,7 @@ export default function UtilityPage() {
             setSubStatus(cache.status || null);
           }
         } catch {}
-        // firestore seed
+        // Firestore seed for plan name (prevents flicker)
         try {
           const db = getFirestore();
           const snap = await getDoc(doc(db, 'users', u.uid));
@@ -168,7 +172,7 @@ export default function UtilityPage() {
     return () => unsub();
   }, []);
 
-  // redirect after auth check
+  // Redirect after auth check
   useEffect(() => {
     if (!authChecked) return;
     if (!user) {
@@ -185,7 +189,7 @@ export default function UtilityPage() {
     }
   }, [authChecked, user, router]);
 
-  // single-session guard
+  // Single-session guard
   useEffect(() => {
     if (!user?.uid) return;
     const db = getFirestore();
@@ -278,14 +282,17 @@ export default function UtilityPage() {
     }
   }, [router, openModal, closeModal]);
 
+  // Friendly error + zero-remaining helper (sets used = limit)
   const showFriendlyError = useCallback(
     ({ status, code, msg }) => {
       const m = String(msg || '').toLowerCase();
-      const persistRemaining = (val) => {
-        setRemaining(val);
-        try {
-          if (user?.uid) localStorage.setItem(remainingKey(user.uid, planName), String(val));
-        } catch {}
+      const setUsedToLimit = () => {
+        if (typeof effectiveLimit === 'number') {
+          setUsedTodayCount(effectiveLimit);
+          try {
+            if (user?.uid) localStorage.setItem(usedKey(user.uid), String(effectiveLimit));
+          } catch {}
+        }
       };
 
       if (status === 401 && /invalid|expired|token|unauthorized/.test(m)) {
@@ -318,12 +325,12 @@ export default function UtilityPage() {
             },
           ],
         });
-        persistRemaining(0);
+        setUsedToLimit();
         return;
       }
       if (status === 429 || code === 'LIMIT_EXCEEDED' || /daily limit/.test(m)) {
-        setLimitModalOpen(true); // use custom modal
-        persistRemaining(0);
+        setLimitModalOpen(true);
+        setUsedToLimit();
         return;
       }
       if (status === 400) {
@@ -359,40 +366,23 @@ export default function UtilityPage() {
         actions: [{ label: 'Retry', onClick: () => { closeModal(); } }],
       });
     },
-    [router, closeModal, openModal, planName, user?.uid]
+    // effectiveLimit is derived; safe to omit to avoid re-creating handler
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [router, closeModal, openModal, user?.uid]
   );
 
-  // subscription-status fetch (TTL + abort)
+  // 🔒 Force a LIVE subscription-status fetch on entry (no TTL, no stale reads).
+  // Shows a small blocking loader so the UI never flashes "buy a plan" incorrectly.
   useEffect(() => {
+    if (!authChecked || !user) return;
+
     const run = async () => {
-      if (!authChecked || !user) return;
-
-      // TTL cache
-      try {
-        const raw = localStorage.getItem(subCacheKey(user.uid));
-        if (raw) {
-          const cache = JSON.parse(raw);
-          if (cache?.t && Date.now() - cache.t < SUB_CACHE_TTL_MS) {
-            setSubActive(!!cache.active);
-            if (cache?.plan && PLAN_LIMITS[cache.plan] != null) {
-              setPlanName(cache.plan);
-              setDailyLimit((dl) => (typeof dl === 'number' ? dl : PLAN_LIMITS[cache.plan]));
-            }
-            setSubStatus(cache.status || null);
-            setSubChecked(true);
-            return;
-          }
-        }
-      } catch {}
-
       if (subReqAbort.current) {
-        try {
-          subReqAbort.current.abort();
-        } catch {}
+        try { subReqAbort.current.abort(); } catch {}
       }
       const controller = new AbortController();
       subReqAbort.current = controller;
-
+      setSubLoading(true);
       try {
         const idToken = await auth.currentUser.getIdToken();
         const res = await fetch('/api/subscription-status', {
@@ -419,6 +409,10 @@ export default function UtilityPage() {
           if (data.plan && PLAN_LIMITS[data.plan] != null) {
             setPlanName(data.plan);
             setDailyLimit(PLAN_LIMITS[data.plan]);
+          } else {
+            // if no plan, clear planName/dailyLimit
+            setPlanName(null);
+            setDailyLimit(null);
           }
         } else {
           console.warn('subscription-status error:', data?.error || res.status);
@@ -428,20 +422,66 @@ export default function UtilityPage() {
       } finally {
         subReqAbort.current = null;
         setSubChecked(true);
+        // tiny delay keeps UX smooth without feeling laggy
+        setTimeout(() => setSubLoading(false), 150);
       }
     };
+
     run();
     return () => {
       if (subReqAbort.current) {
-        try {
-          subReqAbort.current.abort();
-        } catch {}
+        try { subReqAbort.current.abort(); } catch {}
         subReqAbort.current = null;
       }
     };
   }, [authChecked, user]);
 
-  // compute an "effective" limit immediately from plan
+  // Also refetch on return from Stripe (if URL has success/canceled/session_id)
+  useEffect(() => {
+    if (!user) return;
+    const hasStripeParams =
+      typeof window !== 'undefined' &&
+      /(?:success|canceled|session_id|portal)=/.test(window.location.search);
+    if (!hasStripeParams) return;
+
+    (async () => {
+      setSubLoading(true);
+      try {
+        const idToken = await auth.currentUser.getIdToken();
+        const res = await fetch('/api/subscription-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          setSubActive(!!data.active);
+          setSubStatus(data.status || null);
+          if (data.plan && PLAN_LIMITS[data.plan] != null) {
+            setPlanName(data.plan);
+            setDailyLimit(PLAN_LIMITS[data.plan]);
+          } else {
+            setPlanName(null);
+            setDailyLimit(null);
+          }
+          try {
+            localStorage.setItem(
+              subCacheKey(user.uid),
+              JSON.stringify({
+                active: !!data.active,
+                plan: data.plan || null,
+                status: data.status || null,
+                t: Date.now(),
+              })
+            );
+          } catch {}
+        }
+      } finally {
+        setSubLoading(false);
+      }
+    })();
+  }, [user]);
+
+  // Compute limit from current plan
   const effectiveLimit =
     typeof dailyLimit === 'number' && dailyLimit >= 0
       ? dailyLimit
@@ -449,23 +489,24 @@ export default function UtilityPage() {
       ? PLAN_LIMITS[planName]
       : null;
 
-  // init remaining when limit known
+  // Load USED count for today (per user)
   useEffect(() => {
     if (!user?.uid) return;
-    if (typeof effectiveLimit !== 'number') return;
     try {
-      const key = remainingKey(user.uid, planName);
-      const raw = localStorage.getItem(key);
+      const raw = localStorage.getItem(usedKey(user.uid));
       const stored = raw != null ? parseInt(raw, 10) : NaN;
-      const next = Number.isFinite(stored)
-        ? Math.max(0, Math.min(effectiveLimit, stored))
-        : effectiveLimit;
-      setRemaining(next);
-      localStorage.setItem(key, String(next));
+      const nextUsed = Number.isFinite(stored) ? Math.max(0, stored) : 0;
+      setUsedTodayCount(nextUsed);
     } catch {
-      setRemaining(effectiveLimit);
+      setUsedTodayCount(0);
     }
-  }, [user?.uid, planName, effectiveLimit]);
+  }, [user?.uid]);
+
+  // Remaining derived from used + limit
+  const remaining = useMemo(() => {
+    if (typeof effectiveLimit !== 'number' || typeof usedTodayCount !== 'number') return null;
+    return Math.max(0, effectiveLimit - usedTodayCount);
+  }, [effectiveLimit, usedTodayCount]);
 
   const onPickImage1 = useCallback(
     (e) => {
@@ -513,7 +554,6 @@ export default function UtilityPage() {
   const handleCompare = useCallback(async () => {
     if (compareInFlight.current) return;
 
-    // NEW: Guard only shows modal, doesn't disable the button globally
     if (typeof remaining === 'number' && remaining <= 0) {
       setLimitModalOpen(true);
       return;
@@ -572,12 +612,12 @@ export default function UtilityPage() {
       if (!data.result) throw new Error('Comparison result missing in response.');
       setComparisonResult(data.result);
 
-      setRemaining((prev) => {
-        const seed =
-          typeof prev === 'number' ? prev : typeof effectiveLimit === 'number' ? effectiveLimit : 0;
-        const next = Math.max(seed - 1, 0);
+      // Increment USED (not remaining)
+      setUsedTodayCount((prev) => {
+        const base = Number.isFinite(prev) ? prev : 0;
+        const next = base + 1;
         try {
-          if (user?.uid) localStorage.setItem(remainingKey(user.uid, planName), String(next));
+          if (user?.uid) localStorage.setItem(usedKey(user.uid), String(next));
         } catch {}
         return next;
       });
@@ -592,26 +632,25 @@ export default function UtilityPage() {
     image2,
     getFreshIdToken,
     showFriendlyError,
-    effectiveLimit,
-    planName,
     user?.uid,
     openModal,
     closeModal,
     remaining,
   ]);
 
-  // derived flags
+  // Plan flags
   const hasActivePlan = !!subActive || (typeof effectiveLimit === 'number' && effectiveLimit > 0);
-  // NOTE: Button will NOT be disabled when remaining <= 0; we'll show modal on click instead.
-  const showNoPlanUI = authChecked && !hasActivePlan && (fsLoaded || subChecked);
+
+  // 👇 No "buy a plan" banner until LIVE subscription check is done (prevents flicker).
+  const showNoPlanUI = authChecked && !!user && !hasActivePlan && subChecked;
 
   // For modal display
   const usedToday = useMemo(() => {
-    if (typeof remaining !== 'number' || typeof effectiveLimit !== 'number') return null;
-    const used = Math.max(0, effectiveLimit - remaining);
+    if (typeof effectiveLimit !== 'number') return null;
+    const used = Math.min(effectiveLimit, Math.max(0, usedTodayCount ?? 0));
     const pct = effectiveLimit ? Math.min(100, Math.round((used / effectiveLimit) * 100)) : 0;
     return { used, pct };
-  }, [remaining, effectiveLimit]);
+  }, [usedTodayCount, effectiveLimit]);
 
   const resetAt = useMemo(() => formatTime(nextMidnightLocal()), []);
 
@@ -625,11 +664,24 @@ export default function UtilityPage() {
   const prev1 = useObjectUrl(image1);
   const prev2 = useObjectUrl(image2);
 
+  // 🔄 Entry loader: block UI only until we finish the LIVE sub fetch.
+  const blockingLoad = !!user && subLoading && !subChecked;
+
   if (!user) return <></>;
 
   return (
     <div className="min-h-screen bg-white text-gray-900 dark:bg-gray-900 dark:text-white font-sans">
       <Navbar user={user} onSignOut={handleSignOut} />
+
+      {/* Entry loader overlay (quick) */}
+      {blockingLoad && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-white/70 dark:bg-black/60 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-3">
+            <div className="animate-spin h-10 w-10 rounded-full border-4 border-purple-600 border-t-transparent" />
+            <p className="text-sm text-gray-700 dark:text-gray-300">Checking subscription…</p>
+          </div>
+        </div>
+      )}
 
       <div className="p-6 max-w-4xl mx-auto">
         <div className="flex justify-between items-center mb-8">

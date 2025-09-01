@@ -1,3 +1,5 @@
 .env
 node_modules
 .next
+firebase-debug.log
+firestore-debug.log
